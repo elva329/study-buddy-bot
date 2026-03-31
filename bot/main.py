@@ -123,11 +123,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Only PDF files are supported at this time.")
 
 
+async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+    context_text = '\n'.join(pdf_texts)
+    if not context_text.strip():
+        await update.message.reply_text("No PDF content found. Please upload a PDF first.")
+        return
+    prompt = (
+        "You are a study assistant. Based on the following course material, generate a short quiz (3-5 questions) with answers. "
+        "Format: Q1: ... A1: ... Q2: ... A2: ...\n\nMaterial:\n" + context_text
+    )
+    global gpt
+    quiz_text = gpt.submit(prompt)
+    await update.message.reply_text(quiz_text)
+
+
 def main():
     global gpt
     gpt = ChatGPT(config)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('quiz', quiz))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
