@@ -1,0 +1,1 @@
+# Prometheus metrics setup (stub)
