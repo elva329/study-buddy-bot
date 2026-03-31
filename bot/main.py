@@ -1,3 +1,6 @@
+import random
+from datetime import datetime
+import json
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import re
 import os
@@ -9,12 +12,33 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from database.db_client import log_message, log_quiz_score, get_quiz_stats, get_quiz_history, log_quiz_attempt_db, get_user_progress_db
 from dotenv import load_dotenv
-from bot.rag_utils import save_uploaded_file
-from bot.pdf_utils import extract_texts_from_all_pdfs
+from bot.rag_utils import save_uploaded_file, list_uploaded_files
+from bot.pdf_utils import extract_texts_from_all_pdfs, extract_text_from_pdf
 
-import json
-from datetime import datetime
-import random
+
+async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    files = list_uploaded_files()
+    if not files:
+        await update.message.reply_text("No uploaded notes found. Please upload PDF files first.")
+        return
+    await update.message.reply_text("Generating summaries for your uploaded notes...")
+    global gpt
+    for fname in files:
+        if not fname.lower().endswith('.pdf'):
+            continue
+        pdf_path = os.path.join(UPLOAD_DIR, fname)
+        try:
+            text = extract_text_from_pdf(pdf_path)
+            if not text.strip():
+                await update.message.reply_text(f"❌ Could not extract text from {fname}.")
+                continue
+            prompt = f"Summarize the following study material in 5 concise bullet points for university students.\n\nMaterial:\n{text[:3000]}"
+            summary = gpt.submit(prompt)
+            await update.message.reply_text(f"📄 *{fname}*\n{summary}", parse_mode='Markdown')
+        except Exception as e:
+            await update.message.reply_text(f"Error summarizing {fname}: {e}")
+
 
 # Helper to log quiz attempts
 
@@ -508,6 +532,7 @@ def main():
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('quiz', quiz))
     app.add_handler(CommandHandler('progress', progress))
+    app.add_handler(CommandHandler('summarize', summarize))
 
     # Route all text to a dispatcher that checks quiz state
     async def text_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
