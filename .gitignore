@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.env
+venv/
+.env.*
+
+# Logs
+logs/
+*.log
+
+# Docker
+*.db
+*.sqlite3
+db.sqlite3
+
+# VSCode
+.vscode/
+
+# System
+.DS_Store
+
+# CI/CD
+coverage/

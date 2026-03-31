@@ -1,0 +1,6 @@
+configparser
+python-telegram-bot==22.5
+urllib3==2.6.2
+openai
+psycopg2-binary
+python-dotenv
