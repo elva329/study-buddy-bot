@@ -1,16 +1,56 @@
-# For batching PDF upload notifications
-from bot.pdf_utils import extract_texts_from_all_pdfs
-from bot.rag_utils import save_uploaded_file
-from dotenv import load_dotenv
-from database.db_client import log_message
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram import Update
-import configparser
-import requests
-import logging
-import sys
+from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import re
 import os
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+import sys
+import logging
+import requests
+import configparser
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from database.db_client import log_message
+from dotenv import load_dotenv
+from bot.rag_utils import save_uploaded_file
+from bot.pdf_utils import extract_texts_from_all_pdfs
+
+import json
+from datetime import datetime
+import random
+
+# Helper to log quiz attempts
+
+
+def log_quiz_attempt(user_id, num_questions):
+    try:
+        if os.path.exists(PROGRESS_LOG):
+            with open(PROGRESS_LOG, 'r') as f:
+                data = json.load(f)
+        else:
+            data = {}
+    except Exception:
+        data = {}
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = []
+    data[uid].append({
+        'timestamp': datetime.now().isoformat(),
+        'num_questions': num_questions
+    })
+    with open(PROGRESS_LOG, 'w') as f:
+        json.dump(data, f, indent=2)
+
+# Helper to get user progress
+
+
+def get_user_progress(user_id):
+    try:
+        with open(PROGRESS_LOG, 'r') as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    return data.get(str(user_id), [])
+
+
+# For batching PDF upload notifications
 uploaded_files = []
 upload_batch_timer = None
 
@@ -18,6 +58,7 @@ gpt = None
 
 # Always load .env from project root
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+PROGRESS_LOG = os.path.join(PROJECT_ROOT, 'user_progress.json')
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'))
 sys.path.append(PROJECT_ROOT)
 
@@ -50,8 +91,7 @@ class ChatGPT:
             "api-key": api_key,
         }
         self.system_message = (
-            'You are a helper! Your users are university students. '
-            'Your replies should be conversational, informative, use simple words, and be straightforward.'
+            'You are a helpful assistant that creates multiple-choice quiz questions for university students.'
         )
 
     def submit(self, user_message: str):
@@ -61,8 +101,8 @@ class ChatGPT:
         ]
         payload = {
             "messages": messages,
-            "temperature": 1,
-            "max_tokens": 150,
+            "temperature": 0.7,
+            "max_tokens": 500,
             "top_p": 1,
             "stream": False
         }
@@ -96,7 +136,15 @@ logging.basicConfig(
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Hello! I am your Study Buddy Bot. How can I help you today?')
+    await update.message.reply_text(
+        'Hello! I am your Study Buddy Bot. 📚\n\n'
+        'I can help you study by:\n'
+        '• Uploading PDF files for context\n'
+        '• Creating multiple-choice quizzes from your materials\n'
+        '• Answering questions about your study materials\n\n'
+        'Use /quiz to start a quiz!\n'
+        'Use /progress to see your quiz history'
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,95 +182,335 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1.5)
             if uploaded_files:
                 files_str = ', '.join(uploaded_files)
-                await update.message.reply_text(f"PDFs {files_str} uploaded and saved.")
+                await update.message.reply_text(f"✅ PDFs {files_str} uploaded and saved!")
                 uploaded_files.clear()
         upload_batch_timer = asyncio.create_task(send_batch())
     else:
         await update.message.reply_text("Only PDF files are supported at this time.")
 
-
-# Store user quiz preferences in memory (simple dict for demo; use DB for production)
+# Store user quiz and preferences in memory
 user_quiz_prefs = {}
+user_quiz_state = {}
+
+
+def parse_mcq_question(raw_text):
+    """Parse a multiple choice question from LLM response"""
+    lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+
+    question_data = {
+        'question': None,
+        'options': [],
+        'answer': None,
+        'explanation': None
+    }
+
+    # Find the question line
+    question_line = None
+    for i, line in enumerate(lines):
+        if line and not re.match(r'^[A-D]\)', line) and not line.startswith('Answer:') and not line.startswith('Explanation:'):
+            # This is likely the question
+            question_line = line
+            break
+
+    if question_line:
+        # Clean up question
+        question_data['question'] = re.sub(
+            r'^Q\d*:?\s*', '', question_line).strip()
+
+    # Find options (lines starting with A), B), etc.)
+    option_pattern = re.compile(r'^([A-D])[\.\):]\s*(.*)')
+    for line in lines:
+        match = option_pattern.match(line)
+        if match:
+            question_data['options'].append(match.group(2).strip())
+
+    # Find answer
+    for line in lines:
+        if line.startswith('Answer:'):
+            answer_text = re.sub(r'^Answer:\s*', '', line).strip()
+            # Extract the letter if present
+            letter_match = re.match(r'^([A-D])', answer_text, re.IGNORECASE)
+            if letter_match:
+                question_data['answer'] = letter_match.group(1).upper()
+            else:
+                question_data['answer'] = answer_text
+            break
+
+    # Find explanation
+    for line in lines:
+        if line.startswith('Explanation:'):
+            question_data['explanation'] = re.sub(
+                r'^Explanation:\s*', '', line).strip()
+            break
+
+    # Validate we have all required parts
+    if (question_data['question'] and len(question_data['options']) == 4 and question_data['answer']):
+        return question_data
+    return None
+
+
+async def generate_mcq_question(update, context, user_id, question_num, total_questions, context_text):
+    """Generate a single multiple-choice question"""
+    prompt = (
+        f"Based on the following course material, create a multiple-choice quiz question (#{question_num} of {total_questions}).\n\n"
+        f"Material:\n{context_text}\n\n"
+        f"Instructions:\n"
+        f"1. Create ONE multiple-choice question with 4 options (A, B, C, D)\n"
+        f"2. Format EXACTLY like this example:\n"
+        f"Q: What is the main component of a GAN?\n"
+        f"A) Encoder\n"
+        f"B) Decoder\n"
+        f"C) Generator\n"
+        f"D) Classifier\n"
+        f"Answer: C\n"
+        f"Explanation: GANs consist of a Generator and Discriminator, with the Generator creating fake data.\n\n"
+        f"ONLY output the question in this exact format. Do not add any extra text."
+    )
+
+    global gpt
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        response = gpt.submit(prompt)
+        print(f"LLM Response (attempt {attempt + 1}):\n{response}\n")
+
+        question_data = parse_mcq_question(response)
+        if question_data:
+            return question_data
+
+    return None
+
+
+async def generate_and_send_next_question(update, context, user_id):
+    state = user_quiz_state.get(user_id)
+    if not state:
+        return
+
+    qnum = state['current'] + 1
+    total = state['amount']
+    context_text = state['context_text']
+
+    # Send "generating" message
+    thinking_msg = await update.message.reply_text(f"🤔 Generating question {qnum}/{total}...")
+
+    # Generate the question
+    question_data = await generate_mcq_question(update, context, user_id, qnum, total, context_text)
+
+    if not question_data:
+        await thinking_msg.edit_text("❌ Sorry, I couldn't generate a valid question. Please try again.")
+        await finish_quiz(update, context, user_id)
+        return
+
+    # Store the question
+    state['last_question'] = question_data
+
+    # Format the message
+    msg = f"📝 **Question {qnum}/{total}**\n\n{question_data['question']}\n\n"
+    for i, opt in enumerate(question_data['options']):
+        msg += f"{chr(65+i)}) {opt}\n"
+
+    # Create keyboard with letter buttons
+    keyboard = [[KeyboardButton(f"{chr(65+i)}")] for i in range(4)]
+
+    await thinking_msg.delete()
+    await update.message.reply_text(
+        msg,
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            one_time_keyboard=True,
+            resize_keyboard=True
+        ),
+        parse_mode='Markdown'
+    )
+
+
+async def finish_quiz(update, context, user_id):
+    state = user_quiz_state.get(user_id)
+    if not state:
+        await update.message.reply_text("Quiz state lost. Please start again with /quiz.")
+        user_quiz_prefs.pop(user_id, None)
+        user_quiz_state.pop(user_id, None)
+        return
+
+    score = state.get('score', 0)
+    total = state.get('amount', 0)
+    percent = int(100 * score / total) if total > 0 else 0
+
+    # Create simple review - just questions with correct answers
+    review = "📋 **Quiz Review**\n\n"
+
+    for i, ans in enumerate(state.get('answers', [])):
+        q = ans['q']
+        correct_answer_letter = q['answer']
+        correct_answer_text = q['options'][ord(
+            correct_answer_letter) - ord('A')]
+
+        # Show the question and correct answer
+        review += f"**Q{i+1}:** {q['question']}\n"
+        review += f"✓ Correct answer: {correct_answer_letter}) {correct_answer_text}\n\n"
+
+        # Split into multiple messages if too long
+        if len(review) > 3500 and i < total - 1:
+            await update.message.reply_text(review, parse_mode='Markdown')
+            review = "📋 **Quiz Review (continued)**\n\n"
+
+    # Send final review message
+    await update.message.reply_text(
+        f"🎉 **Quiz Complete!**\n\n"
+        f"Your Score: **{score}/{total}** ({percent}%)\n\n"
+        f"{review}",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode='Markdown'
+    )
+
+    log_quiz_attempt(user_id, total)
+    user_quiz_prefs.pop(user_id, None)
+    user_quiz_state.pop(user_id, None)
 
 
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    # Step 1: Ask for quiz format if not set
-    if user_id not in user_quiz_prefs:
-        await update.message.reply_text(
-            "What quiz format do you prefer?\n1. Multiple Choice\n2. Short Answer\n3. Mixed\n(Reply with 1, 2, 3, or the format name)"
-        )
-        user_quiz_prefs[user_id] = {"step": "format"}
-        return
-    # Step 2: Handle format selection
-    if user_quiz_prefs[user_id]["step"] == "format":
-        format_choice = update.message.text.strip()
-        # Accept both text and number replies
-        format_map = {
-            "1": "Multiple Choice",
-            "2": "Short Answer",
-            "3": "Mixed",
-            "Multiple Choice": "Multiple Choice",
-            "Short Answer": "Short Answer",
-            "Mixed": "Mixed"
-        }
-        if format_choice not in format_map:
-            await update.message.reply_text(
-                "Please choose a valid format: 1. Multiple Choice, 2. Short Answer, 3. Mixed."
-            )
+    text = update.message.text.strip()
+
+    # If user is already in a quiz session
+    if user_id in user_quiz_prefs:
+        prefs = user_quiz_prefs[user_id]
+
+        # Step 1: Asking for number of questions
+        if prefs.get("step") == "asking_amount":
+            try:
+                num_questions = int(text)
+                if num_questions <= 0 or num_questions > 20:
+                    await update.message.reply_text("Please enter a number between 1 and 20.")
+                    return
+                prefs["amount"] = num_questions
+                prefs["step"] = "in_progress"
+
+                # Initialize quiz state
+                pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+                context_text = '\n'.join(pdf_texts)
+
+                if not context_text.strip():
+                    await update.message.reply_text(
+                        "⚠️ No study materials found!\n\n"
+                        "Please upload some PDF files first by sending them to me, then try /quiz again."
+                    )
+                    user_quiz_prefs.pop(user_id, None)
+                    return
+
+                user_quiz_state[user_id] = {
+                    "amount": num_questions,
+                    "current": 0,
+                    "score": 0,
+                    "answers": [],
+                    "context_text": context_text,
+                    "last_question": None
+                }
+
+                await generate_and_send_next_question(update, context, user_id)
+                return
+            except ValueError:
+                await update.message.reply_text("Please enter a valid number (1-20).")
+                return
+
+        # Step 2: Handling answer to current question
+        elif prefs.get("step") == "in_progress":
+            state = user_quiz_state.get(user_id)
+            if not state or 'last_question' not in state or state['last_question'] is None:
+                await update.message.reply_text("Quiz state lost. Please start again with /quiz.")
+                user_quiz_prefs.pop(user_id, None)
+                user_quiz_state.pop(user_id, None)
+                return
+
+            question = state['last_question']
+            user_answer = update.message.text.strip().upper()
+
+            # Validate answer
+            if user_answer not in ['A', 'B', 'C', 'D']:
+                await update.message.reply_text("❌ Please answer with A, B, C, or D.")
+                return
+
+            # Check if correct
+            correct = (user_answer == question['answer'])
+            correct_option_text = question['options'][ord(
+                question['answer']) - ord('A')]
+            user_option_text = question['options'][ord(user_answer) - ord('A')]
+
+            if correct:
+                state['score'] += 1
+                feedback = f"✅ **Correct!**\n\n"
+                feedback += f"Your answer: {user_answer}) {user_option_text}\n\n"
+            else:
+                feedback = f"❌ **Wrong!**\n\n"
+                feedback += f"Your answer: {user_answer}) {user_option_text}\n"
+                feedback += f"Correct answer: **{question['answer']}) {correct_option_text}**\n\n"
+
+            if question.get('explanation'):
+                feedback += f"📚 **Explanation:** {question['explanation']}"
+
+            # Store answer
+            state['answers'].append({
+                'user': user_answer,
+                'correct': correct,
+                'q': question
+            })
+            state['current'] += 1
+
+            # Send feedback
+            await update.message.reply_text(feedback, parse_mode='Markdown')
+
+            # Send next question or finish
+            if state['current'] < state['amount']:
+                await generate_and_send_next_question(update, context, user_id)
+            else:
+                await finish_quiz(update, context, user_id)
             return
-        user_quiz_prefs[user_id]["format"] = format_map[format_choice]
-        user_quiz_prefs[user_id]["step"] = "amount"
-        await update.message.reply_text(
-            "How many questions do you want? (Enter a number between 3 and 15)",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return
-    # Step 3: Handle amount selection
-    if user_quiz_prefs[user_id]["step"] == "amount":
-        try:
-            num_questions = int(update.message.text.strip())
-            if not (3 <= num_questions <= 15):
-                raise ValueError
-        except Exception:
-            await update.message.reply_text("Please enter a valid number between 3 and 15.")
-            return
-        user_quiz_prefs[user_id]["amount"] = num_questions
-        user_quiz_prefs[user_id]["step"] = "ready"
-        await update.message.reply_text("Generating your quiz... Please wait.")
-        # Now generate the quiz
+
+    # New quiz session
+    else:
+        # Check if there are any PDFs uploaded
         pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
-        context_text = '\n'.join(pdf_texts)
-        if not context_text.strip():
-            await update.message.reply_text("No PDF content found. Please upload a PDF first.")
-            user_quiz_prefs.pop(user_id, None)
+        if not pdf_texts:
+            await update.message.reply_text(
+                "📚 **To start a quiz, please upload some study materials first!**\n\n"
+                "1. Send me PDF files of your study materials\n"
+                "2. Then use /quiz to test your knowledge\n\n"
+                "I'll create multiple-choice questions based on your uploaded materials.",
+                parse_mode='Markdown'
+            )
             return
-        format_choice = user_quiz_prefs[user_id]["format"]
-        num_questions = user_quiz_prefs[user_id]["amount"]
-        if format_choice == "Multiple Choice":
-            prompt = (
-                f"You are a study assistant. Based on the following course material, generate {num_questions} multiple choice questions. "
-                "For each question, provide 4 options labeled A-D, and give the answer immediately after the question. "
-                "Format: Q1: ...\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer: ...\n\nMaterial:\n" + context_text
-            )
-        elif format_choice == "Short Answer":
-            prompt = (
-                f"You are a study assistant. Based on the following course material, generate {num_questions} short answer questions. "
-                "For each question, provide the answer immediately after the question. "
-                "Format: Q1: ...\nAnswer: ...\n\nMaterial:\n" + context_text
-            )
-        else:  # Mixed
-            prompt = (
-                f"You are a study assistant. Based on the following course material, generate a quiz with {num_questions} questions. "
-                "Mix multiple choice and short answer questions. For multiple choice, provide 4 options labeled A-D. "
-                "For each question, provide the answer immediately after the question. "
-                "Format: Q1 (Multiple Choice): ...\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer: ...\nQ2 (Short Answer): ...\nAnswer: ...\n\nMaterial:\n" + context_text
-            )
-        global gpt
-        quiz_text = gpt.submit(prompt)
-        await update.message.reply_text(quiz_text)
-        user_quiz_prefs.pop(user_id, None)
+
+        user_quiz_prefs[user_id] = {
+            "step": "asking_amount"
+        }
+        await update.message.reply_text(
+            "📝 **How many questions would you like to answer?**\n\n"
+            "Please enter a number between 1 and 20:",
+            parse_mode='Markdown'
+        )
+
+# --- Progress Command ---
+
+
+async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    progress = get_user_progress(user_id)
+    if not progress:
+        await update.message.reply_text(
+            "📊 No quiz history found yet.\n\n"
+            "Take a quiz with /quiz to start tracking your progress!"
+        )
         return
+
+    msg = f"📊 **Quiz History**\n\n"
+    msg += f"You have completed **{len(progress)}** quiz sessions.\n\n"
+    msg += "**Recent attempts:**\n"
+
+    for i, entry in enumerate(progress[-5:], 1):
+        dt = entry['timestamp'].split('T')[0]
+        msg += f"{i}. {dt}: {entry['num_questions']} questions\n"
+
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 def main():
@@ -230,12 +518,19 @@ def main():
     gpt = ChatGPT(config)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
-    # Accept both /quiz command and text replies for quiz flow
     app.add_handler(CommandHandler('quiz', quiz))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(
-        '^(Multiple Choice|Short Answer|Mixed|[0-9]+)$'), quiz))
+    app.add_handler(CommandHandler('progress', progress))
+
+    # Route all text to a dispatcher that checks quiz state
+    async def text_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.message.from_user.id
+        if user_id in user_quiz_prefs:
+            await quiz(update, context)
+        else:
+            await handle_message(update, context)
+
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, handle_message))
+        filters.TEXT & ~filters.COMMAND, text_dispatcher))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.run_polling()
 
