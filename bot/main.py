@@ -7,7 +7,7 @@ import requests
 import configparser
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from database.db_client import log_message
+from database.db_client import log_message, log_quiz_score, get_quiz_stats, get_quiz_history, log_quiz_attempt_db, get_user_progress_db
 from dotenv import load_dotenv
 from bot.rag_utils import save_uploaded_file
 from bot.pdf_utils import extract_texts_from_all_pdfs
@@ -19,35 +19,16 @@ import random
 # Helper to log quiz attempts
 
 
+# Store quiz session metadata in DB (replaces JSON)
 def log_quiz_attempt(user_id, num_questions):
-    try:
-        if os.path.exists(PROGRESS_LOG):
-            with open(PROGRESS_LOG, 'r') as f:
-                data = json.load(f)
-        else:
-            data = {}
-    except Exception:
-        data = {}
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = []
-    data[uid].append({
-        'timestamp': datetime.now().isoformat(),
-        'num_questions': num_questions
-    })
-    with open(PROGRESS_LOG, 'w') as f:
-        json.dump(data, f, indent=2)
+    log_quiz_attempt_db(user_id, num_questions)
 
 # Helper to get user progress
 
 
+# Fetch quiz session metadata from DB (replaces JSON)
 def get_user_progress(user_id):
-    try:
-        with open(PROGRESS_LOG, 'r') as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    return data.get(str(user_id), [])
+    return get_user_progress_db(user_id)
 
 
 # For batching PDF upload notifications
@@ -364,6 +345,8 @@ async def finish_quiz(update, context, user_id):
     )
 
     log_quiz_attempt(user_id, total)
+    # Store score in DB for progress tracking
+    log_quiz_score(user_id, score, total, percent)
     user_quiz_prefs.pop(user_id, None)
     user_quiz_state.pop(user_id, None)
 
@@ -494,23 +477,28 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    progress = get_user_progress(user_id)
-    if not progress:
+    total_quizzes, avg_score, best_score, weak_topics = get_quiz_stats(user_id)
+    quiz_history = get_quiz_history(user_id, limit=5)
+    if total_quizzes == 0:
         await update.message.reply_text(
             "📊 No quiz history found yet.\n\n"
             "Take a quiz with /quiz to start tracking your progress!"
         )
         return
 
-    msg = f"📊 **Quiz History**\n\n"
-    msg += f"You have completed **{len(progress)}** quiz sessions.\n\n"
-    msg += "**Recent attempts:**\n"
-
-    for i, entry in enumerate(progress[-5:], 1):
-        dt = entry['timestamp'].split('T')[0]
-        msg += f"{i}. {dt}: {entry['num_questions']} questions\n"
-
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    # Placeholder for worst topic name (since topic tracking is not implemented)
+    worst_topic = 'N/A'
+    msg = f"📊 Quiz History\n\n"
+    msg += f"📝 Total Quizzes Taken: {total_quizzes}\n"
+    msg += f"📈 Average Score: {avg_score}%\n"
+    msg += f"🏆 Best Score: {best_score}%\n"
+    msg += f"⚠️ Worst Score: {worst_topic}\n\n"
+    msg += f"You have completed {total_quizzes} quiz sessions.\n\n"
+    msg += "🕓 Recent attempts:\n"
+    for i, (ts, total) in enumerate(quiz_history, 1):
+        dt = ts.split('T')[0] if 'T' in ts else str(ts)[:10]
+        msg += f"{i}. {dt}: {total} questions\n"
+    await update.message.reply_text(msg)
 
 
 def main():
