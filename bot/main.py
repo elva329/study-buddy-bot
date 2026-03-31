@@ -1,15 +1,18 @@
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
-import os
-import sys
-import logging
-import requests
-import configparser
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from database.db_client import log_message
-from dotenv import load_dotenv
-from bot.rag_utils import save_uploaded_file
+# For batching PDF upload notifications
 from bot.pdf_utils import extract_texts_from_all_pdfs
+from bot.rag_utils import save_uploaded_file
+from dotenv import load_dotenv
+from database.db_client import log_message
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update
+import configparser
+import requests
+import logging
+import sys
+import os
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+uploaded_files = []
+upload_batch_timer = None
 
 gpt = None
 
@@ -119,7 +122,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         file_bytes = await file.download_as_bytearray()
         file_path = save_uploaded_file(file_bytes, document.file_name)
-        await update.message.reply_text(f"PDF '{document.file_name}' uploaded and saved.")
+        global uploaded_files, upload_batch_timer
+        uploaded_files.append(document.file_name)
+        import asyncio
+        # Cancel previous timer if running
+        if upload_batch_timer is not None and not upload_batch_timer.done():
+            upload_batch_timer.cancel()
+        # Only send a message after a short delay (batch window)
+
+        async def send_batch():
+            await asyncio.sleep(1.5)
+            if uploaded_files:
+                files_str = ', '.join(uploaded_files)
+                await update.message.reply_text(f"PDFs {files_str} uploaded and saved.")
+                uploaded_files.clear()
+        upload_batch_timer = asyncio.create_task(send_batch())
     else:
         await update.message.reply_text("Only PDF files are supported at this time.")
 
