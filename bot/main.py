@@ -1,3 +1,4 @@
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 import os
 import sys
 import logging
@@ -123,19 +124,88 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Only PDF files are supported at this time.")
 
 
+# Store user quiz preferences in memory (simple dict for demo; use DB for production)
+user_quiz_prefs = {}
+
+
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
-    context_text = '\n'.join(pdf_texts)
-    if not context_text.strip():
-        await update.message.reply_text("No PDF content found. Please upload a PDF first.")
+    user_id = update.message.from_user.id
+    # Step 1: Ask for quiz format if not set
+    if user_id not in user_quiz_prefs:
+        await update.message.reply_text(
+            "What quiz format do you prefer?\n1. Multiple Choice\n2. Short Answer\n3. Mixed\n(Reply with 1, 2, 3, or the format name)"
+        )
+        user_quiz_prefs[user_id] = {"step": "format"}
         return
-    prompt = (
-        "You are a study assistant. Based on the following course material, generate a short quiz (3-5 questions) with answers. "
-        "Format: Q1: ... A1: ... Q2: ... A2: ...\n\nMaterial:\n" + context_text
-    )
-    global gpt
-    quiz_text = gpt.submit(prompt)
-    await update.message.reply_text(quiz_text)
+    # Step 2: Handle format selection
+    if user_quiz_prefs[user_id]["step"] == "format":
+        format_choice = update.message.text.strip()
+        # Accept both text and number replies
+        format_map = {
+            "1": "Multiple Choice",
+            "2": "Short Answer",
+            "3": "Mixed",
+            "Multiple Choice": "Multiple Choice",
+            "Short Answer": "Short Answer",
+            "Mixed": "Mixed"
+        }
+        if format_choice not in format_map:
+            await update.message.reply_text(
+                "Please choose a valid format: 1. Multiple Choice, 2. Short Answer, 3. Mixed."
+            )
+            return
+        user_quiz_prefs[user_id]["format"] = format_map[format_choice]
+        user_quiz_prefs[user_id]["step"] = "amount"
+        await update.message.reply_text(
+            "How many questions do you want? (Enter a number between 3 and 15)",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    # Step 3: Handle amount selection
+    if user_quiz_prefs[user_id]["step"] == "amount":
+        try:
+            num_questions = int(update.message.text.strip())
+            if not (3 <= num_questions <= 15):
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("Please enter a valid number between 3 and 15.")
+            return
+        user_quiz_prefs[user_id]["amount"] = num_questions
+        user_quiz_prefs[user_id]["step"] = "ready"
+        await update.message.reply_text("Generating your quiz... Please wait.")
+        # Now generate the quiz
+        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+        context_text = '\n'.join(pdf_texts)
+        if not context_text.strip():
+            await update.message.reply_text("No PDF content found. Please upload a PDF first.")
+            user_quiz_prefs.pop(user_id, None)
+            return
+        format_choice = user_quiz_prefs[user_id]["format"]
+        num_questions = user_quiz_prefs[user_id]["amount"]
+        if format_choice == "Multiple Choice":
+            prompt = (
+                f"You are a study assistant. Based on the following course material, generate {num_questions} multiple choice questions. "
+                "For each question, provide 4 options labeled A-D, and give the answer immediately after the question. "
+                "Format: Q1: ...\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer: ...\n\nMaterial:\n" + context_text
+            )
+        elif format_choice == "Short Answer":
+            prompt = (
+                f"You are a study assistant. Based on the following course material, generate {num_questions} short answer questions. "
+                "For each question, provide the answer immediately after the question. "
+                "Format: Q1: ...\nAnswer: ...\n\nMaterial:\n" + context_text
+            )
+        else:  # Mixed
+            prompt = (
+                f"You are a study assistant. Based on the following course material, generate a quiz with {num_questions} questions. "
+                "Mix multiple choice and short answer questions. For multiple choice, provide 4 options labeled A-D. "
+                "For each question, provide the answer immediately after the question. "
+                "Format: Q1 (Multiple Choice): ...\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer: ...\nQ2 (Short Answer): ...\nAnswer: ...\n\nMaterial:\n" + context_text
+            )
+        global gpt
+        quiz_text = gpt.submit(prompt)
+        await update.message.reply_text(quiz_text)
+        user_quiz_prefs.pop(user_id, None)
+        return
 
 
 def main():
@@ -143,7 +213,10 @@ def main():
     gpt = ChatGPT(config)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
+    # Accept both /quiz command and text replies for quiz flow
     app.add_handler(CommandHandler('quiz', quiz))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(
+        '^(Multiple Choice|Short Answer|Mixed|[0-9]+)$'), quiz))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
