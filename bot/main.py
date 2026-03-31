@@ -7,6 +7,8 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from database.db_client import log_message
 from dotenv import load_dotenv
+from bot.rag_utils import save_uploaded_file
+from bot.pdf_utils import extract_texts_from_all_pdfs
 
 gpt = None
 
@@ -18,6 +20,10 @@ sys.path.append(PROJECT_ROOT)
 # Load config from project root
 config = configparser.ConfigParser()
 config.read(os.path.join(PROJECT_ROOT, 'config', 'config.ini'))
+
+# Define UPLOAD_DIR
+UPLOAD_DIR = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', 'uploads'))
 
 # --- ChatGPT REST API Client ---
 
@@ -94,9 +100,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     log_message(user_id, user_message, sender='user')
     global gpt
-    response = gpt.submit(user_message)
+    # RAG: extract all PDF text and prepend to prompt
+    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+    context_text = '\n'.join(pdf_texts)
+    if context_text.strip():
+        prompt = f"Context from your uploaded PDFs:\n{context_text}\n\nQuestion: {user_message}"
+    else:
+        prompt = user_message
+    response = gpt.submit(prompt)
     log_message(user_id, response, sender='bot')
     await update.message.reply_text(response)
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    if document.mime_type == 'application/pdf':
+        file = await context.bot.get_file(document.file_id)
+        file_bytes = await file.download_as_bytearray()
+        file_path = save_uploaded_file(file_bytes, document.file_name)
+        await update.message.reply_text(f"PDF '{document.file_name}' uploaded and saved.")
+    else:
+        await update.message.reply_text("Only PDF files are supported at this time.")
 
 
 def main():
@@ -106,6 +130,7 @@ def main():
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.run_polling()
 
 
