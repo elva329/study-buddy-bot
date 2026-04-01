@@ -24,49 +24,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 llm = LLMService(config)
 
-# --- New upload state ---
-user_new_upload_mode = set()
-user_new_upload_files = {}
-
 
 def debug_log(msg):
     print(f"[DEBUG] {msg}")
     logger.info(f"[DEBUG] {msg}")
-
-
-async def newupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_log(f"/newupload called by user {update.message.from_user.id}")
-    """Command to indicate user wants to upload new documents for a new course"""
-    user_id = update.message.from_user.id
-
-    # Clear any existing new upload mode for this user
-    user_new_upload_mode.add(user_id)
-
-    # Initialize empty list for new uploads if not exists
-    if user_id not in user_new_upload_files:
-        user_new_upload_files[user_id] = []
-    else:
-        # Clear previous new uploads
-        user_new_upload_files[user_id] = []
-
-    await update.message.reply_text(
-        "📂 New Upload Mode Activated!\n\n"
-        "Please upload your new PDF documents. "
-        "These documents will be used exclusively for your next quiz.\n\n"
-        "When you use /quiz, only these newly uploaded documents will be used.\n"
-        "To exit this mode, just start a quiz or use /cancel_upload."
-    )
-
-
-async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel new upload mode"""
-    user_id = update.message.from_user.id
-    user_new_upload_mode.discard(user_id)
-    if user_id in user_new_upload_files:
-        user_new_upload_files[user_id] = []
-    await update.message.reply_text(
-        "✅ New upload mode cancelled. Future quizzes will use all available documents."
-    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,8 +40,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• Answering questions about your study materials\n\n'
         'Commands:\n'
         '/quiz - Start a quiz\n'
-        '/newupload - Upload documents for a new course\n'
-        '/cancel_upload - Cancel new upload mode\n'
         '/summarize - Get summaries of your uploaded PDFs\n'
         '/progress - View your quiz history'
     )
@@ -91,19 +50,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     user_id = update.message.from_user.id
 
-    # Check if user is in new upload mode
-    if user_id in user_new_upload_mode and user_id in user_new_upload_files and user_new_upload_files[user_id]:
-        # Use only new uploads for context
-        pdf_texts = []
-        for fname in user_new_upload_files[user_id]:
-            pdf_path = os.path.join(UPLOAD_DIR, fname)
-            if os.path.exists(pdf_path):
-                pdf_texts.append(extract_text_from_pdf(pdf_path))
-        context_text = '\n'.join(pdf_texts)
-    else:
-        # Use all PDFs
-        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
-        context_text = '\n'.join(pdf_texts)
+    # Use all PDFs for context
+    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+    context_text = '\n'.join(pdf_texts)
 
     if context_text.strip():
         prompt = f"Context from your uploaded PDFs:\n{context_text}\n\nQuestion: {user_message}"
@@ -125,14 +74,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         global uploaded_files, upload_batch_timer
         uploaded_files.append(document.file_name)
-
-        # If user is in new upload mode, track their new uploads
-        if user_id in user_new_upload_mode:
-            if user_id not in user_new_upload_files:
-                user_new_upload_files[user_id] = []
-            user_new_upload_files[user_id].append(document.file_name)
-            logger.info(
-                f"User {user_id} uploaded new document: {document.file_name} for new course")
 
         # Cancel previous timer if running
         if upload_batch_timer is not None and not upload_batch_timer.done():
@@ -179,21 +120,8 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Determine which PDFs to use
-    use_new_uploads = False
-    pdf_texts = []
-
-    if user_id in user_new_upload_mode and user_id in user_new_upload_files and user_new_upload_files[user_id]:
-        # Use only new uploads for quiz
-        use_new_uploads = True
-        for fname in user_new_upload_files[user_id]:
-            pdf_path = os.path.join(UPLOAD_DIR, fname)
-            if os.path.exists(pdf_path):
-                pdf_texts.append(extract_text_from_pdf(pdf_path))
-                logger.info(f"Using new upload for quiz: {fname}")
-    else:
-        # Use all PDFs
-        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+    # Use all PDFs for quiz
+    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
 
     # If user is already in a quiz session
     if user_id in user_quiz_prefs:
@@ -216,11 +144,6 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Please upload some PDF files first by sending them to me, then try /quiz again."
                     )
                     user_quiz_prefs.pop(user_id, None)
-                    # Clear new upload mode if it was active
-                    if use_new_uploads:
-                        user_new_upload_mode.discard(user_id)
-                        if user_id in user_new_upload_files:
-                            user_new_upload_files[user_id] = []
                     return
 
                 user_quiz_state[user_id] = {
@@ -304,13 +227,6 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📝 How many questions would you like to answer?\n\nPlease enter a number between 1 and 20:"
         )
-
-    # After quiz completion, clear new upload mode if it was used
-    # Note: This is handled in finish_quiz, but we also clear here if quiz fails to start
-    if use_new_uploads and user_id not in user_quiz_state:
-        user_new_upload_mode.discard(user_id)
-        if user_id in user_new_upload_files:
-            user_new_upload_files[user_id] = []
 
 
 async def generate_mcq_question(update, context, user_id, question_num, total_questions, context_text):
@@ -401,15 +317,6 @@ async def finish_quiz(update, context, user_id):
         f"🎉 Quiz Complete!\n\nYour Score: {score}/{total} ({percent}%)\n\n{review}",
         reply_markup=ReplyKeyboardRemove()
     )
-
-    # Clear new upload mode after quiz completion if it was used
-    if user_id in user_new_upload_mode:
-        user_new_upload_mode.discard(user_id)
-        if user_id in user_new_upload_files:
-            user_new_upload_files[user_id] = []
-        await update.message.reply_text(
-            "📂 New upload mode cleared. Your new documents have been added to your study materials."
-        )
 
     user_quiz_prefs.pop(user_id, None)
     user_quiz_state.pop(user_id, None)

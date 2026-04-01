@@ -38,6 +38,8 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             prompt = f"Summarize the following study material in 5 concise bullet points for university students.\n\nMaterial:\n{text[:3000]}"
             summary = gpt.submit(prompt)
+            # Remove markdown formatting (asterisks)
+            summary = summary.replace("**", "")
             await update.message.reply_text(f"{fname}:\n{summary}")
         except Exception as e:
             await update.message.reply_text(f"Error summarizing {fname}: {e}")
@@ -102,9 +104,11 @@ class ChatGPT:
             'You are a helpful assistant that creates multiple-choice quiz questions for university students.'
         )
 
-    def submit(self, user_message: str):
+    def submit(self, user_message: str, system_message: str = None):
+        if system_message is None:
+            system_message = self.system_message
         messages = [
-            {"role": "system", "content": self.system_message},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": user_message},
         ]
         payload = {
@@ -165,25 +169,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_message(user_id, user_message, sender='user')
     global gpt
 
-    # Check if user is in new upload mode
-    if user_id in user_new_upload_mode and user_id in user_new_upload_files and user_new_upload_files[user_id]:
-        # Use only new uploads for context
-        pdf_texts = []
-        for fname in user_new_upload_files[user_id]:
-            pdf_path = os.path.join(UPLOAD_DIR, fname)
-            if os.path.exists(pdf_path):
-                pdf_texts.append(extract_text_from_pdf(pdf_path))
-        context_text = '\n'.join(pdf_texts)
-    else:
-        # Use all PDFs (default behavior)
-        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
-        context_text = '\n'.join(pdf_texts)
+    # Use all PDFs for context
+    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+    context_text = '\n'.join(pdf_texts)
 
     if context_text.strip():
         prompt = f"Context from your uploaded PDFs:\n{context_text}\n\nQuestion: {user_message}"
     else:
         prompt = user_message
     response = gpt.submit(prompt)
+    # Remove markdown formatting (asterisks)
+    response = response.replace("**", "")
     log_message(user_id, response, sender='bot')
     await update.message.reply_text(response)
 
@@ -585,6 +581,7 @@ def search_internet(query: str) -> str:
     """Generate an answer using LLM without document context"""
     try:
         global gpt
+        qa_system_message = "You are a helpful study assistant that answers questions based on general knowledge. Provide clear and concise answers suitable for university students."
         prompt = (
             f"Please provide a clear and informative answer to the following question:\n\n"
             f"Question: {query}\n\n"
@@ -592,7 +589,9 @@ def search_internet(query: str) -> str:
             f"If this is a specialized topic, explain it in simple terms that students can understand."
         )
 
-        answer = gpt.submit(prompt)
+        answer = gpt.submit(prompt, system_message=qa_system_message)
+        # Remove markdown formatting (asterisks)
+        answer = answer.replace("**", "")
         return answer
 
     except Exception as e:
@@ -626,6 +625,7 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
 
             # Generate answer using LLM with context
             global gpt
+            qa_system_message = "You are a helpful study assistant that answers questions based on provided study materials. Provide clear and concise answers."
             prompt = (
                 f"Based on the following study materials, please answer this question:\n\n"
                 f"Question: {question}\n\n"
@@ -634,7 +634,9 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"If the materials don't contain relevant information, respond with: 'The provided materials do not contain information to answer this question.'"
             )
 
-            answer = gpt.submit(prompt)
+            answer = gpt.submit(prompt, system_message=qa_system_message)
+            # Remove markdown formatting (asterisks)
+            answer = answer.replace("**", "")
 
             # Check if answer indicates no relevant information found
             no_answer_indicators = [

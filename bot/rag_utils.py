@@ -66,7 +66,7 @@ def retrieve_relevant_chunks(query: str, chunks: List[Dict], top_k: int = 3) -> 
     scored_chunks = []
     for chunk in chunks:
         score = calculate_relevance(chunk['text'])
-        if score >= 2:  # Require at least 2 meaningful keyword matches
+        if score >= 1:  # Require at least 1 meaningful keyword match
             scored_chunks.append((chunk, score))
 
     # Sort by relevance (descending) and return top K
