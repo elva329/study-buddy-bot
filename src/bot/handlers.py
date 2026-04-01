@@ -50,12 +50,11 @@ async def newupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_new_upload_files[user_id] = []
 
     await update.message.reply_text(
-        "📂 **New Upload Mode Activated!**\n\n"
+        "📂 New Upload Mode Activated!\n\n"
         "Please upload your new PDF documents. "
         "These documents will be used exclusively for your next quiz.\n\n"
         "When you use /quiz, only these newly uploaded documents will be used.\n"
-        "To exit this mode, just start a quiz or use /cancel_upload.",
-        parse_mode='Markdown'
+        "To exit this mode, just start a quiz or use /cancel_upload."
     )
 
 
@@ -66,8 +65,7 @@ async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_new_upload_files:
         user_new_upload_files[user_id] = []
     await update.message.reply_text(
-        "✅ New upload mode cancelled. Future quizzes will use all available documents.",
-        parse_mode='Markdown'
+        "✅ New upload mode cancelled. Future quizzes will use all available documents."
     )
 
 
@@ -171,7 +169,7 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             prompt = f"Summarize the following study material in 5 concise bullet points for university students.\n\nMaterial:\n{text[:3000]}"
             summary = llm.submit(prompt)
-            await update.message.reply_text(f"📄 *{fname}*\n{summary}", parse_mode='Markdown')
+            await update.message.reply_text(f"📄 {fname}\n{summary}")
         except Exception as e:
             await update.message.reply_text(f"Error summarizing {fname}: {e}")
 
@@ -264,12 +262,12 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if correct:
                 state['score'] += 1
-                feedback = f"✅ **Correct!**\n\nYour answer: {user_answer}) {user_option_text}\n\n"
+                feedback = f"✅ Correct!\n\nYour answer: {user_answer}) {user_option_text}\n\n"
             else:
-                feedback = f"❌ **Wrong!**\n\nYour answer: {user_answer}) {user_option_text}\nCorrect answer: **{question['answer']}) {correct_option_text}**\n\n"
+                feedback = f"❌ Wrong!\n\nYour answer: {user_answer}) {user_option_text}\nCorrect answer: {question['answer']}) {correct_option_text}\n\n"
 
             if question.get('explanation'):
-                feedback += f"📚 **Explanation:** {question['explanation']}"
+                feedback += f"📚 Explanation: {question['explanation']}"
 
             # Store answer
             state['answers'].append({
@@ -280,7 +278,7 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state['current'] += 1
 
             # Send feedback
-            await update.message.reply_text(feedback, parse_mode='Markdown')
+            await update.message.reply_text(feedback)
 
             # Send next question or finish
             if state['current'] < state['amount']:
@@ -293,11 +291,10 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         if not pdf_texts:
             await update.message.reply_text(
-                "📚 **To start a quiz, please upload some study materials first!**\n\n"
+                "📚 To start a quiz, please upload some study materials first!\n\n"
                 "1. Send me PDF files of your study materials\n"
                 "2. Then use /quiz to test your knowledge\n\n"
-                "I'll create multiple-choice questions based on your uploaded materials.",
-                parse_mode='Markdown'
+                "I'll create multiple-choice questions based on your uploaded materials."
             )
             return
 
@@ -305,8 +302,7 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "step": "asking_amount"
         }
         await update.message.reply_text(
-            "📝 **How many questions would you like to answer?**\n\nPlease enter a number between 1 and 20:",
-            parse_mode='Markdown'
+            "📝 How many questions would you like to answer?\n\nPlease enter a number between 1 and 20:"
         )
 
     # After quiz completion, clear new upload mode if it was used
@@ -360,7 +356,7 @@ async def generate_and_send_next_question(update, context, user_id):
         return
 
     state['last_question'] = question_data
-    msg = f"📝 **Question {qnum}/{total}**\n\n{question_data['question']}\n\n"
+    msg = f"📝 Question {qnum}/{total}\n\n{question_data['question']}\n\n"
     for i, opt in enumerate(question_data['options']):
         msg += f"{chr(65+i)}) {opt}\n"
 
@@ -372,8 +368,7 @@ async def generate_and_send_next_question(update, context, user_id):
             keyboard,
             one_time_keyboard=True,
             resize_keyboard=True
-        ),
-        parse_mode='Markdown'
+        )
     )
 
 
@@ -389,23 +384,22 @@ async def finish_quiz(update, context, user_id):
     total = state.get('amount', 0)
     percent = int(100 * score / total) if total > 0 else 0
 
-    review = "📋 **Quiz Review**\n\n"
+    review = "📋 Quiz Review\n\n"
     for i, ans in enumerate(state.get('answers', [])):
         q = ans['q']
         correct_answer_letter = q['answer']
         correct_answer_text = q['options'][ord(
             correct_answer_letter) - ord('A')]
-        review += f"**Q{i+1}:** {q['question']}\n"
+        review += f"Q{i+1}: {q['question']}\n"
         review += f"✓ Correct answer: {correct_answer_letter}) {correct_answer_text}\n\n"
 
         if len(review) > 3500 and i < total - 1:
-            await update.message.reply_text(review, parse_mode='Markdown')
-            review = "📋 **Quiz Review (continued)**\n\n"
+            await update.message.reply_text(review)
+            review = "📋 Quiz Review (continued)\n\n"
 
     await update.message.reply_text(
-        f"🎉 **Quiz Complete!**\n\nYour Score: **{score}/{total}** ({percent}%)\n\n{review}",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode='Markdown'
+        f"🎉 Quiz Complete!\n\nYour Score: {score}/{total} ({percent}%)\n\n{review}",
+        reply_markup=ReplyKeyboardRemove()
     )
 
     # Clear new upload mode after quiz completion if it was used

@@ -12,8 +12,8 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from database.db_client import log_message, log_quiz_score, get_quiz_stats, get_quiz_history, log_quiz_attempt_db, get_user_progress_db
 from dotenv import load_dotenv
-from bot.rag_utils import save_uploaded_file, list_uploaded_files
-from bot.pdf_utils import extract_texts_from_all_pdfs, extract_text_from_pdf
+from bot.rag_utils import save_uploaded_file, list_uploaded_files, retrieve_relevant_chunks, clear_uploads
+from bot.pdf_utils import extract_texts_from_all_pdfs, extract_text_from_pdf, extract_texts_with_metadata
 
 
 async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,13 +145,17 @@ logging.basicConfig(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        'Hello! I am your Study Buddy Bot. 📚\n\n'
+        'Hello! I am your Study Buddy Bot.\n\n'
         'I can help you study by:\n'
         '• Uploading PDF files for context\n'
         '• Creating multiple-choice quizzes from your materials\n'
         '• Answering questions about your study materials\n\n'
-        'Use /quiz to start a quiz!\n'
-        'Use /progress to see your quiz history'
+        'Available commands:\n'
+        '/quiz - Start a quiz session\n'
+        '/ask <question> - Ask a question about your notes\n'
+        '/progress - See your quiz history\n'
+        '/summarize - Summarize your documents\n'
+        '/endsession - Clear documents and start a new session'
     )
 
 
@@ -214,6 +218,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Store user quiz and preferences in memory
 user_quiz_prefs = {}
 user_quiz_state = {}
+
+# Store user Q&A conversation context
+user_ask_context = {}
+user_ask_mode = {}
 
 
 def parse_mcq_question(raw_text):
@@ -549,17 +557,129 @@ async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if weak_topics and weak_topics != 'N/A':
         worst_score_text = f"{worst_score}% (Topic: {weak_topics})"
 
-    msg = f"Quiz History\n\n"
-    msg += f"Total Quizzes Taken: {total_quizzes}\n"
-    msg += f"Average Score: {avg_score}%\n"
-    msg += f"Best Score: {best_score}%\n"
-    msg += f"Worst Performance: {worst_score_text}\n\n"
+    msg = f"📊 Quiz History\n\n"
+    msg += f"📖 Total Quizzes Taken: {total_quizzes}\n"
+    msg += f"🎯 Average Score: {avg_score}%\n"
+    msg += f"🏆 Best Score: {best_score}%\n"
+    msg += f"📉 Worst Performance: {worst_score_text}\n\n"
     msg += f"You have completed {total_quizzes} quiz sessions.\n\n"
     msg += "Recent attempts:\n"
     for i, (ts, total) in enumerate(quiz_history, 1):
         dt = ts.split('T')[0] if 'T' in ts else str(ts)[:10]
         msg += f"{i}. {dt}: {total} questions\n"
     await update.message.reply_text(msg)
+
+
+# --- Q&A Command with RAG ---
+
+async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start Q&A session - ask user to provide their question"""
+    user_id = update.message.from_user.id
+
+    # Set user in ask mode
+    user_ask_mode[user_id] = True
+    await update.message.reply_text("Please provide your question")
+
+
+def search_internet(query: str) -> str:
+    """Generate an answer using LLM without document context"""
+    try:
+        global gpt
+        prompt = (
+            f"Please provide a clear and informative answer to the following question:\n\n"
+            f"Question: {query}\n\n"
+            f"Provide a comprehensive but concise answer based on general knowledge. "
+            f"If this is a specialized topic, explain it in simple terms that students can understand."
+        )
+
+        answer = gpt.submit(prompt)
+        return answer
+
+    except Exception as e:
+        print(f"[Internet Search Error] {e}")
+        # Return a basic response
+        return f"Unable to generate an answer for this question at the moment. Please try again later."
+
+
+async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process the user's question in Q&A mode"""
+    user_id = update.message.from_user.id
+    question = update.message.text.strip()
+
+    try:
+        # Extract chunks with metadata from all uploaded PDFs
+        chunks = extract_texts_with_metadata(UPLOAD_DIR)
+        relevant_chunks = []
+
+        # Try to find relevant chunks if documents exist
+        if chunks:
+            relevant_chunks = retrieve_relevant_chunks(
+                question, chunks, top_k=3)
+
+        # If relevant chunks found, use LLM with document context
+        if relevant_chunks:
+            # Format context from retrieved chunks
+            context_text = "\n\n".join([
+                f"[From {chunk['filename']}, Page {chunk['page_num']}]\n{chunk['text'][:500]}"
+                for chunk in relevant_chunks
+            ])
+
+            # Generate answer using LLM with context
+            global gpt
+            prompt = (
+                f"Based on the following study materials, please answer this question:\n\n"
+                f"Question: {question}\n\n"
+                f"Study Materials:\n{context_text}\n\n"
+                f"Please provide a clear and concise answer based on the materials. "
+                f"If the materials don't contain relevant information, respond with: 'The provided materials do not contain information to answer this question.'"
+            )
+
+            answer = gpt.submit(prompt)
+
+            # Check if answer indicates no relevant information found
+            no_answer_indicators = [
+                "do not contain information",
+                "does not contain information",
+                "not mentioned in",
+                "not discussed in",
+                "no information about",
+                "no mention of",
+                "materials do not"
+            ]
+
+            answer_lower = answer.lower()
+            has_answer = not any(
+                indicator in answer_lower for indicator in no_answer_indicators)
+
+            if has_answer:
+                # Format response with source information
+                response = f"Answer: {answer}\n\n"
+                response += "Source information:\n"
+                for i, chunk in enumerate(relevant_chunks, 1):
+                    response += f"{i}. {chunk['filename']} (Page {chunk['page_num']})\n"
+
+                await update.message.reply_text(response)
+
+                # Store context for follow-up questions
+                user_ask_context[user_id] = {
+                    'last_question': question,
+                    'last_answer': answer,
+                    'chunks': relevant_chunks
+                }
+                user_ask_mode.pop(user_id, None)
+                return
+
+        # No relevant chunks or document says no answer - search internet
+        internet_result = search_internet(question)
+
+        response = f"Could not find related answers from your uploaded docs.\n\nHere is the answer from internet search\n\n{internet_result}"
+        await update.message.reply_text(response)
+
+        user_ask_mode.pop(user_id, None)
+
+    except Exception as e:
+        await update.message.reply_text(f"Error processing your question: {e}")
+        user_ask_mode.pop(user_id, None)
 
 
 def main():
@@ -571,11 +691,14 @@ def main():
     app.add_handler(CommandHandler('progress', progress))
     app.add_handler(CommandHandler('summarize', summarize))
     app.add_handler(CommandHandler('endsession', endsession))
+    app.add_handler(CommandHandler('ask', ask))
 
-    # Route all text to a dispatcher that checks quiz state
+    # Route all text to a dispatcher that checks quiz and ask states
     async def text_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.message.from_user.id
-        if user_id in user_quiz_prefs:
+        if user_id in user_ask_mode:
+            await process_ask_question(update, context)
+        elif user_id in user_quiz_prefs:
             await quiz(update, context)
         else:
             await handle_message(update, context)
