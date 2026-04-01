@@ -1,7 +1,8 @@
 # Entry point for Study Buddy Bot
 
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-from src.bot.handlers import start, handle_message, handle_document, summarize, quiz, progress
+from src.bot.handlers import start, handle_message, handle_document, summarize, quiz, progress, newupload, cancel_upload
+from src.config import config
 
 
 def main():
@@ -12,6 +13,8 @@ def main():
     app.add_handler(CommandHandler('quiz', quiz))
     app.add_handler(CommandHandler('progress', progress))
     app.add_handler(CommandHandler('summarize', summarize))
+    app.add_handler(CommandHandler('newupload', newupload))
+    app.add_handler(CommandHandler('cancel_upload', cancel_upload))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
