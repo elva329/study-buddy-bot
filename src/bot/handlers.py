@@ -40,6 +40,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• Answering questions about your study materials\n\n'
         'Commands:\n'
         '/quiz - Start a quiz\n'
+        '/plan - Generate a weekly study plan\n'
         '/summarize - Get summaries of your uploaded PDFs\n'
         '/progress - View your quiz history'
     )
@@ -330,3 +331,46 @@ async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Progress tracking is coming soon!\n\n"
         "Check back later for detailed statistics about your quiz performance."
     )
+
+
+async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"/plan called by user {update.message.from_user.id}")
+    user_id = update.message.from_user.id
+
+    try:
+        # Extract all text from uploaded PDFs
+        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+
+        if not pdf_texts:
+            await update.message.reply_text(
+                "No study materials found!\n\n"
+                "Please upload PDF files first to generate a study plan."
+            )
+            return
+
+        context_text = '\n'.join(pdf_texts)
+
+        # Generate study plan using LLM
+        prompt = (
+            f"Based on the following study materials, create a detailed weekly study plan for a university student.\n\n"
+            f"Study Materials:\n{context_text[:2000]}\n\n"
+            f"Please generate a structured 7-day study plan that:\n"
+            f"1. Covers all major topics from the materials\n"
+            f"2. Distributes topics across the week\n"
+            f"3. Includes suggested daily study duration\n"
+            f"4. Provides specific learning objectives for each day\n\n"
+            f"Format the plan as a clear, structured schedule with days and topics."
+        )
+
+        plan_content = llm.submit(prompt)
+
+        # Format as a nicely structured message
+        response = "Weekly Study Plan\n"
+        # response += "=" * 40 + "\n\n"
+        response += plan_content
+        response += "\n\n" + "=" * 40
+
+        await update.message.reply_text(response)
+
+    except Exception as e:
+        await update.message.reply_text(f"Error generating study plan: {e}")

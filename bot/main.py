@@ -1,19 +1,25 @@
 import random
-from datetime import datetime
 import json
-from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import re
 import os
 import sys
 import logging
 import requests
 import configparser
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from database.db_client import log_message, log_quiz_score, get_quiz_stats, get_quiz_history, log_quiz_attempt_db, get_user_progress_db
+from datetime import datetime
+from io import BytesIO
+
+import matplotlib
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
-from bot.rag_utils import save_uploaded_file, list_uploaded_files, retrieve_relevant_chunks, clear_uploads
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
 from bot.pdf_utils import extract_texts_from_all_pdfs, extract_text_from_pdf, extract_texts_with_metadata
+from bot.rag_utils import save_uploaded_file, list_uploaded_files, retrieve_relevant_chunks, clear_uploads
+from database.db_client import log_message, log_quiz_score, get_quiz_stats, get_quiz_history, log_quiz_attempt_db, get_user_progress_db
+
+matplotlib.use('Agg')
 
 
 async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -38,8 +44,8 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             prompt = f"Summarize the following study material in 5 concise bullet points for university students.\n\nMaterial:\n{text[:3000]}"
             summary = gpt.submit(prompt)
-            # Remove markdown formatting (asterisks)
-            summary = summary.replace("**", "")
+            # Remove markdown formatting
+            summary = strip_markdown(summary)
             await update.message.reply_text(f"{fname}:\n{summary}")
         except Exception as e:
             await update.message.reply_text(f"Error summarizing {fname}: {e}")
@@ -124,7 +130,244 @@ class ChatGPT:
         else:
             return "Error: " + response.text
 
-# --- Telegram Bot Logic ---
+# --- Helper Functions ---
+
+
+def strip_markdown(text: str) -> str:
+    """Remove all markdown formatting from text"""
+    # Remove ** bold
+    text = text.replace("**", "")
+    # Remove __ bold
+    text = text.replace("__", "")
+    # Remove * and _ italic
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)
+    text = re.sub(r'_([^_]+)_', r'\1', text)
+    # Remove ### headers (keep content)
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+    # Remove ``` code blocks
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    # Remove inline code
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Remove [text](url) links, keep text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    # Remove --- horizontal rules
+    text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
+    return text.strip()
+
+
+def format_study_plan_table(plan_text: str) -> str:
+    """Format study plan into a table-like structure for Telegram"""
+    # Strip markdown first
+    plan_text = strip_markdown(plan_text)
+
+    # Split by lines and reconstruct in ASCII table format
+    lines = [line.strip() for line in plan_text.split('\n') if line.strip()]
+
+    # Create formatted output
+    formatted = "Weekly Study Plan"
+    # formatted += "=" * 50 + "\n\n"
+
+    current_day = None
+    for line in lines:
+        # Detect day headers
+        if 'Day' in line and ':' in line:
+            if current_day is not None:
+                formatted += "\n"
+            current_day = line
+            formatted += f"📅 {line}\n"
+            formatted += "-" * 50 + "\n"
+        else:
+            # Add other content with proper indentation
+            if line:
+                formatted += f"  {line}\n"
+
+    formatted += "=" * 50 + "\n"
+    return formatted
+
+
+def generate_study_plan_image(plan_text: str) -> BytesIO:
+    """Generate a professional weekly study plan timetable using matplotlib"""
+    try:
+        # Strip markdown
+        plan_text = strip_markdown(plan_text)
+
+        # Helper function to wrap text for table cells
+        def wrap_text(text, max_width=12):
+            """Wrap text to fit in table cells with proper line breaks"""
+            if not text:
+                return ''
+            words = text.split()
+            lines = []
+            current_line = []
+
+            for word in words:
+                # If adding this word would exceed max_width, start a new line
+                if sum(len(w) for w in current_line) + len(word) + len(current_line) > max_width:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    current_line = [word]
+                else:
+                    current_line.append(word)
+
+            if current_line:
+                lines.append(' '.join(current_line))
+
+            return '\n'.join(lines)
+
+        # Parse the timetable format
+        # Expected format with Time, Monday, Tuesday, Wednesday, Thursday, Friday columns
+        lines = [line.strip()
+                 for line in plan_text.split('\n') if line.strip()]
+
+        # Identify header row (should contain days of week)
+        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+        table_data = []
+        header_found = False
+
+        for line in lines:
+            # Check if this is a header line
+            if any(day in line for day in days):
+                header_found = True
+                # Parse header - split by common delimiters
+                parts = [p.strip() for p in line.replace('\t', '|').split('|')]
+                table_data.append(parts)
+            elif header_found and line:
+                # Parse data rows
+                parts = [p.strip() for p in line.replace('\t', '|').split('|')]
+                if len(parts) >= 2:  # Make sure we have meaningful data
+                    # Pre-filter: remove rows with only empty cells, "--", or whitespace
+                    cleaned_parts = []
+                    for p in parts:
+                        p_clean = p.strip()
+                        # Skip empty, "--", or whitespace-only content
+                        if p_clean and p_clean != '--':
+                            cleaned_parts.append(wrap_text(p))
+                        else:
+                            cleaned_parts.append('')
+
+                    # Only add row if time slot exists AND at least 2 other cells have content
+                    # (time column + at least one topic)
+                    content_count = sum(
+                        1 for p in cleaned_parts[1:] if p and p.strip())
+                    if content_count >= 1 and cleaned_parts[0] and cleaned_parts[0].strip():
+                        table_data.append(cleaned_parts)
+
+        # Normalize the final slot so it always shows a wrap-up / planning block
+        for row in table_data:
+            if not row:
+                continue
+            time_label = row[0].strip().replace(' ', '').lower()
+            if time_label in ('17:45-18:00', '5:45-6:00'):
+                for j in range(1, len(row)):
+                    row[j] = 'Wrap-up & Plan'
+
+        # If parsing failed, create a default timetable structure
+        if not table_data or len(table_data) < 2:
+            # Fallback: create a simple structured format from the text
+            table_data = [
+                ['Time', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+                ['10:00-11:30', 'Study', 'Study', 'Study', 'Study', 'Study'],
+                ['11:30-12:00', 'Break', 'Break', 'Break', 'Break', 'Break'],
+                ['12:00-1:30', 'Study', 'Study', 'Study', 'Study', 'Study'],
+                ['1:30-2:30', 'Lunch', 'Lunch', 'Lunch', 'Lunch', 'Lunch'],
+                ['2:30-4:00', 'Study', 'Study', 'Study', 'Study', 'Review'],
+                ['4:00-4:15', 'Break', 'Break', 'Break', 'Break', 'Break'],
+                ['4:15-5:45', 'Practice', 'Practice',
+                    'Practice', 'Practice', 'Review'],
+                ['5:45-6:00', 'Wrap-up & Plan', 'Wrap-up & Plan',
+                    'Wrap-up & Plan', 'Wrap-up & Plan', 'Wrap-up & Plan']
+            ]
+
+        # Final pass: remove any rows where all non-time cells are empty
+        if len(table_data) > 1:
+            filtered_table = [table_data[0]]  # Keep header
+            for row in table_data[1:]:
+                # Check if row has any real content besides the time slot
+                has_content = any(row[j].strip()
+                                  for j in range(1, len(row)) if row[j])
+                if has_content:
+                    filtered_table.append(row)
+            table_data = filtered_table if len(
+                filtered_table) > 1 else table_data
+
+        # Create figure with proper size for a timetable
+        num_rows = len(table_data)
+        fig, ax = plt.subplots(figsize=(16, 3.6 + num_rows * 1.25))
+        ax.axis('off')
+
+        # Title - centered horizontally and vertically in the top band
+        fig.text(0.5, 0.975, 'Weekly Study Plan (Weekdays: 10:00 AM – 6:00 PM)',
+                 ha='center', va='center', fontsize=18, fontweight='bold')
+
+        # Create table in a bounded area so the title and table stay close together
+        table = ax.table(
+            cellText=table_data,
+            cellLoc='left',
+            loc='center',
+            bbox=[0.0, 0.0, 1.0, 0.960],
+            colWidths=[0.12, 0.176, 0.176, 0.176, 0.176, 0.176]  # 6 columns
+        )
+
+        # Style the table
+        table.auto_set_font_size(False)
+        table.set_fontsize(18)
+
+        row_units = [1]
+        for row in table_data[1:]:
+            max_lines = 1
+            for cell_text in row:
+                if cell_text:
+                    max_lines = max(max_lines, cell_text.count('\n') + 1)
+            row_units.append(max_lines)
+
+        total_units = sum(row_units)
+        usable_height = 0.960
+
+        # Format header row (first row)
+        for i in range(len(table_data[0])):
+            cell = table[(0, i)]
+            cell.set_facecolor('#2E7D32')  # Darker green
+            cell.set_text_props(weight='bold', color='white',
+                                fontsize=18, ha='center', va='center')
+            cell.set_height(usable_height * row_units[0] / total_units * 1.15)
+            cell.PAD = 0.035
+
+        # Format data rows with alternating colors
+        for i in range(1, len(table_data)):
+            for j in range(len(table_data[0])):
+                cell = table[(i, j)]
+
+                # Alternate row colors
+                if i % 2 == 0:
+                    cell.set_facecolor('#E8F5E9')  # Light green
+                else:
+                    cell.set_facecolor('#F1F8E9')  # Very light green
+
+                # Time column styling
+                if j == 0:
+                    cell.set_text_props(
+                        weight='bold', fontsize=18, ha='center', va='top')
+                else:
+                    cell.set_text_props(
+                        fontsize=18, ha='left', va='top', wrap=True)
+
+                # Increase cell height to show wrapped lines based on row content
+                cell.set_height(
+                    usable_height * row_units[i] / total_units * 1.15)
+                cell.PAD = 0.06
+
+        # Save to BytesIO
+        buffer = BytesIO()
+        plt.tight_layout(rect=[0, 0, 1, 0.995])
+        plt.savefig(buffer, format='png', dpi=120, bbox_inches='tight')
+        buffer.seek(0)
+        plt.close(fig)
+
+        return buffer
+
+    except Exception as e:
+        print(f"[Image Generation Error] {e}")
+        return None
 
 
 def get_telegram_token():
@@ -156,7 +399,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• Answering questions about your study materials\n\n'
         'Available commands:\n'
         '/quiz - Start a quiz session\n'
-        '/ask <question> - Ask a question about your notes\n'
+        '/ask - Ask a question about your notes\n'
+        '/plan - Generate a weekly study plan\n'
         '/progress - See your quiz history\n'
         '/summarize - Summarize your documents\n'
         '/endsession - Clear documents and start a new session'
@@ -178,8 +422,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         prompt = user_message
     response = gpt.submit(prompt)
-    # Remove markdown formatting (asterisks)
-    response = response.replace("**", "")
+    # Remove markdown formatting
+    response = strip_markdown(response)
     log_message(user_id, response, sender='bot')
     await update.message.reply_text(response)
 
@@ -577,6 +821,75 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Please provide your question")
 
 
+async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate a weekly study plan based on uploaded documents"""
+    user_id = update.message.from_user.id
+
+    try:
+        # Extract all text from uploaded PDFs
+        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+
+        if not pdf_texts:
+            await update.message.reply_text(
+                "No study materials found!\n\n"
+                "Please upload PDF files first to generate a study plan."
+            )
+            return
+
+        # Send status message
+        status_msg = await update.message.reply_text("⏳ Generating your study plan...")
+
+        context_text = '\n'.join(pdf_texts)
+
+        # Generate study plan using LLM
+        global gpt
+        qa_system_message = "You are a helpful study planning assistant. Create clear, actionable weekly study plans formatted as timetables."
+        prompt = (
+            f"Based on the following study materials, create a professional weekly study timetable for a university student.\n\n"
+            f"Study Materials:\n{context_text[:2000]}\n\n"
+            f"Generate a structured timetable with:\n"
+            f"- Time slots (e.g., 10:00-11:30, 11:30-12:00, etc.)\n"
+            f"- Days of the week (Monday through Friday)\n"
+            f"- Include specific study topics/subjects based on the materials\n"
+            f"- Include break times and lunch breaks\n"
+            f"- Format as a table with headers: Time | Monday | Tuesday | Wednesday | Thursday | Friday\n\n"
+            f"Example format:\n"
+            f"Time | Monday | Tuesday | Wednesday | Thursday | Friday\n"
+            f"10:00-11:30 | Topic A | Topic B | Topic A | Topic B | Topic A\n"
+            f"11:30-12:00 | Break | Break | Break | Break | Break\n"
+            f"17:45-18:00 | Wrap-up & Plan | Wrap-up & Plan | Wrap-up & Plan | Wrap-up & Plan | Wrap-up & Plan\n"
+            f"[continue with more rows covering 10 AM to 6 PM]\n\n"
+            f"Make sure to:\n"
+            f"1. Cover all major topics from the materials\n"
+            f"2. Distribute topics effectively across the week\n"
+            f"3. Include appropriate breaks\n"
+            f"4. Keep time slots to 1.5-2 hours for study, 15-30 minutes for breaks\n\n"
+            f"Format ONLY as the table above, with no other text."
+        )
+
+        plan_content = gpt.submit(prompt, system_message=qa_system_message)
+
+        # Try to generate image version
+        image_buffer = generate_study_plan_image(plan_content)
+
+        if image_buffer:
+            # Delete status message and send image
+            await status_msg.delete()
+            # Send as image
+            await update.message.reply_photo(
+                photo=image_buffer,
+                caption=""
+            )
+        else:
+            # Fallback to text format
+            formatted_plan = format_study_plan_table(plan_content)
+            await status_msg.edit_text("✅ Study plan generated!")
+            await update.message.reply_text(formatted_plan)
+
+    except Exception as e:
+        await update.message.reply_text(f"Error generating study plan: {e}")
+
+
 def search_internet(query: str) -> str:
     """Generate an answer using LLM without document context"""
     try:
@@ -590,8 +903,8 @@ def search_internet(query: str) -> str:
         )
 
         answer = gpt.submit(prompt, system_message=qa_system_message)
-        # Remove markdown formatting (asterisks)
-        answer = answer.replace("**", "")
+        # Remove markdown formatting
+        answer = strip_markdown(answer)
         return answer
 
     except Exception as e:
@@ -635,8 +948,8 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
             answer = gpt.submit(prompt, system_message=qa_system_message)
-            # Remove markdown formatting (asterisks)
-            answer = answer.replace("**", "")
+            # Remove markdown formatting
+            answer = strip_markdown(answer)
 
             # Check if answer indicates no relevant information found
             no_answer_indicators = [
@@ -694,6 +1007,7 @@ def main():
     app.add_handler(CommandHandler('summarize', summarize))
     app.add_handler(CommandHandler('endsession', endsession))
     app.add_handler(CommandHandler('ask', ask))
+    app.add_handler(CommandHandler('plan', plan))
 
     # Route all text to a dispatcher that checks quiz and ask states
     async def text_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
