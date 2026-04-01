@@ -19,10 +19,13 @@ from bot.pdf_utils import extract_texts_from_all_pdfs, extract_text_from_pdf
 async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     files = list_uploaded_files()
+
     if not files:
         await update.message.reply_text("No uploaded notes found. Please upload PDF files first.")
         return
+
     await update.message.reply_text("Generating summaries for your uploaded notes...")
+
     global gpt
     for fname in files:
         if not fname.lower().endswith('.pdf'):
@@ -192,12 +195,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         global uploaded_files, upload_batch_timer
         uploaded_files.append(document.file_name)
 
-        # If user is in new upload mode, track their new uploads
-        if user_id in user_new_upload_mode:
-            if user_id not in user_new_upload_files:
-                user_new_upload_files[user_id] = []
-            user_new_upload_files[user_id].append(document.file_name)
-
         import asyncio
         # Cancel previous timer if running
         if upload_batch_timer is not None and not upload_batch_timer.done():
@@ -208,7 +205,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1.5)
             if uploaded_files:
                 files_str = ', '.join(uploaded_files)
-                await update.message.reply_text(f"✅ PDFs {files_str} uploaded and saved!")
+                await update.message.reply_text(f"PDFs {files_str} uploaded and saved!")
                 uploaded_files.clear()
         upload_batch_timer = asyncio.create_task(send_batch())
     else:
@@ -217,10 +214,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Store user quiz and preferences in memory
 user_quiz_prefs = {}
 user_quiz_state = {}
-
-# --- New upload mode state ---
-user_new_upload_mode = set()
-user_new_upload_files = {}
 
 
 def parse_mcq_question(raw_text):
@@ -392,13 +385,7 @@ async def finish_quiz(update, context, user_id):
     )
 
     # Clear new upload mode after quiz completion if it was used
-    if user_id in user_new_upload_mode:
-        user_new_upload_mode.discard(user_id)
-        if user_id in user_new_upload_files:
-            user_new_upload_files[user_id] = []
-        await update.message.reply_text(
-            "New upload mode cleared. Your new documents have been added to your study materials."
-        )
+    # (No longer needed - user can type /endsession to clear)
 
     user_quiz_prefs.pop(user_id, None)
     user_quiz_state.pop(user_id, None)
@@ -408,30 +395,8 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
 
-    # Determine which PDFs to use based on upload mode
-    use_new_uploads = False
-    pdf_texts = []
-
-    # Check if user is in new upload mode
-    if user_id in user_new_upload_mode:
-        if user_id in user_new_upload_files and user_new_upload_files[user_id]:
-            # Use only new uploads
-            use_new_uploads = True
-            for fname in user_new_upload_files[user_id]:
-                pdf_path = os.path.join(UPLOAD_DIR, fname)
-                if os.path.exists(pdf_path):
-                    pdf_texts.append(extract_text_from_pdf(pdf_path))
-        else:
-            # User is in new upload mode but hasn't uploaded any files yet
-            await update.message.reply_text(
-                "No files uploaded yet!\n\n"
-                "You're in new upload mode but haven't uploaded any documents.\n\n"
-                "Please upload your PDF files first, then try /quiz again."
-            )
-            return
-    else:
-        # Use all available PDFs (default behavior)
-        pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
+    # Get all available PDFs
+    pdf_texts = extract_texts_from_all_pdfs(UPLOAD_DIR)
 
     # If user is already in a quiz session
     if user_id in user_quiz_prefs:
@@ -453,15 +418,10 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if not context_text.strip():
                     await update.message.reply_text(
-                        "⚠️ No study materials found!\n\n"
+                        "No study materials found!\n\n"
                         "Please upload some PDF files first by sending them to me, then try /quiz again."
                     )
                     user_quiz_prefs.pop(user_id, None)
-                    # Clear new upload mode if it was active
-                    if use_new_uploads:
-                        user_new_upload_mode.discard(user_id)
-                        if user_id in user_new_upload_files:
-                            user_new_upload_files[user_id] = []
                     return
 
                 user_quiz_state[user_id] = {
@@ -535,91 +495,67 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # New quiz session
     else:
         if not pdf_texts:
-            if use_new_uploads:
-                # User is in new upload mode but no files were found
-                await update.message.reply_text(
-                    "No files in new upload session!\n\n"
-                    "Please upload PDF documents first, then try /quiz again."
-                )
-            else:
-                # Default mode - no files exist at all
-                await update.message.reply_text(
-                    "No study materials found!\n\n"
-                    "Please upload PDF files first by sending them to me, then try /quiz again."
-                )
+            await update.message.reply_text(
+                "No study materials found!\n\n"
+                "Please upload PDF files first by sending them to me, then try /quiz again."
+            )
             return
 
         user_quiz_prefs[user_id] = {
-            "step": "asking_amount",
-            "use_new_uploads": use_new_uploads
+            "step": "asking_amount"
         }
         await update.message.reply_text(
             "How many questions would you like to answer?\n\n"
             "Please enter a number between 1 and 20:"
         )
 
-    # After quiz completion, clear new upload mode if it was used
-    # Note: This is also handled in finish_quiz
-    if use_new_uploads and user_id not in user_quiz_state:
-        user_new_upload_mode.discard(user_id)
-        if user_id in user_new_upload_files:
-            user_new_upload_files[user_id] = []
+
+# --- Session Management Command ---
+
+
+async def endsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear all uploaded documents to start a new session"""
+    user_id = update.message.from_user.id
+
+    # Import clear_uploads from rag_utils
+    from bot.rag_utils import clear_uploads
+
+    try:
+        clear_uploads()
+        await update.message.reply_text(
+            "Session ended. All uploaded documents have been cleared.\n\n"
+            "You can now upload new documents for your next session."
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Error clearing documents: {e}")
 
 
 # --- Progress Command ---
 
-
-async def newupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Command to indicate user wants to upload new documents for a new course"""
-    user_id = update.message.from_user.id
-
-    # Clear any previous new upload session and start fresh
-    user_new_upload_files[user_id] = []
-    user_new_upload_mode.add(user_id)
-
-    await update.message.reply_text(
-        "📂 <b>New Upload Mode Activated!</b>\n\n"
-        "Please upload your PDF documents for this new category.\n"
-        "These documents will be used <b>exclusively</b> for your next quiz.\n\n"
-        "📍 Files uploaded here will NOT be mixed with previously uploaded files.\n"
-        "📍 After your quiz, this mode will close automatically.\n\n"
-        "To cancel: use /cancel_upload",
-        parse_mode='HTML'
-    )
-
-
-async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel new upload mode"""
-    user_id = update.message.from_user.id
-    user_new_upload_mode.discard(user_id)
-    if user_id in user_new_upload_files:
-        user_new_upload_files[user_id] = []
-    await update.message.reply_text(
-        "✅ New upload mode cancelled. Future quizzes will use all available documents.",
-        parse_mode='HTML'
-    )
-
-
 async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    total_quizzes, avg_score, best_score, weak_topics = get_quiz_stats(user_id)
+    total_quizzes, avg_score, best_score, worst_score, weak_topics = get_quiz_stats(
+        user_id)
     quiz_history = get_quiz_history(user_id, limit=5)
     if total_quizzes == 0:
         await update.message.reply_text(
-            "📊 No quiz history found yet.\n\n"
+            "No quiz history found yet.\n\n"
             "Take a quiz with /quiz to start tracking your progress!"
         )
         return
 
-    # Placeholder for worst topic name (since topic tracking is not implemented)
-    worst_topic = 'N/A'
-    msg = f"📊 Quiz History\n\n"
-    msg += f"📝 Total Quizzes Taken: {total_quizzes}\n"
-    msg += f"📈 Average Score: {avg_score}%\n"
-    msg += f"🏆 Best Score: {best_score}%\n"
-    msg += f"⚠️ Worst Score: {worst_topic}\n\n"
+    # Format worst score display
+    worst_score_text = f"{worst_score}%"
+    if weak_topics and weak_topics != 'N/A':
+        worst_score_text = f"{worst_score}% (Topic: {weak_topics})"
+
+    msg = f"Quiz History\n\n"
+    msg += f"Total Quizzes Taken: {total_quizzes}\n"
+    msg += f"Average Score: {avg_score}%\n"
+    msg += f"Best Score: {best_score}%\n"
+    msg += f"Worst Performance: {worst_score_text}\n\n"
     msg += f"You have completed {total_quizzes} quiz sessions.\n\n"
-    msg += "🕓 Recent attempts:\n"
+    msg += "Recent attempts:\n"
     for i, (ts, total) in enumerate(quiz_history, 1):
         dt = ts.split('T')[0] if 'T' in ts else str(ts)[:10]
         msg += f"{i}. {dt}: {total} questions\n"
@@ -634,8 +570,7 @@ def main():
     app.add_handler(CommandHandler('quiz', quiz))
     app.add_handler(CommandHandler('progress', progress))
     app.add_handler(CommandHandler('summarize', summarize))
-    app.add_handler(CommandHandler('newupload', newupload))
-    app.add_handler(CommandHandler('cancel_upload', cancel_upload))
+    app.add_handler(CommandHandler('endsession', endsession))
 
     # Route all text to a dispatcher that checks quiz state
     async def text_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):

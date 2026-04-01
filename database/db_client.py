@@ -283,12 +283,13 @@ def get_quiz_stats(user_id):
         conn.close()
 
         if not rows:
-            return 0, 0, 0, 'N/A'
+            return 0, 0, 0, 0, 'N/A'
 
         total_quizzes = len(rows)
         percents = [row[2] for row in rows]
         avg_score = round(sum(percents) / total_quizzes, 2)
         best_score = max(percents)
+        worst_score = min(percents)
 
         # Find worst topic (lowest percent correct)
         worst_topic = 'N/A'
@@ -300,7 +301,7 @@ def get_quiz_stats(user_id):
                     min_percent = percent
                     worst_topic = topic
 
-        return total_quizzes, avg_score, best_score, worst_topic
+        return total_quizzes, avg_score, best_score, worst_score, worst_topic
     except Exception as e:
         print(f"[DB Error - get_quiz_stats] {e}")
-        return 0, 0, 0, 'N/A'
+        return 0, 0, 0, 0, 'N/A'
