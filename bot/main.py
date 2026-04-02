@@ -230,6 +230,20 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
+def looks_like_mcq_output(text: str) -> bool:
+    """Detect quiz-style output that should not be returned by /ask."""
+    if not text:
+        return False
+    lower = text.lower()
+    if 'multiple-choice' in lower or 'question 1' in lower:
+        return True
+    if 'correct answer:' in lower:
+        return True
+    if re.search(r'\n\s*[A-D]\)', text):
+        return True
+    return False
+
+
 def format_study_plan_table(plan_text: str) -> str:
     """Format study plan into a table-like structure for Telegram"""
     # Strip markdown first
@@ -1062,7 +1076,8 @@ def search_internet(query: str) -> str:
         prompt = (
             f"Please provide a clear and informative answer to the following question:\n\n"
             f"Question: {query}\n\n"
-            f"Provide a comprehensive but concise answer based on general knowledge. "
+            f"Provide a comprehensive but concise answer based on general knowledge in paragraph form. "
+            f"Do NOT generate quiz questions, options, or 'Correct Answer' format. "
             f"If this is a specialized topic, explain it in simple terms that students can understand."
         )
 
@@ -1110,11 +1125,29 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"Based on the following study materials, please answer this question:\n\n"
                 f"Question: {question}\n\n"
                 f"Study Materials:\n{context_text}\n\n"
-                f"Please provide a clear and concise answer based on the materials. "
+                f"Please provide a clear and concise conceptual explanation (3-6 sentences) based on the materials. "
+                f"Do NOT generate quiz questions, options, or 'Correct Answer' format. "
                 f"If the materials don't contain relevant information, respond with: 'The provided materials do not contain information to answer this question.'"
             )
 
             answer = gpt.submit(prompt, system_message=qa_system_message)
+
+            # Guard against quiz-style drift by forcing one strict retry.
+            if looks_like_mcq_output(answer):
+                strict_prompt = (
+                    f"Answer the following study question directly in paragraph form (max 6 sentences).\n\n"
+                    f"Question: {question}\n\n"
+                    f"Context:\n{context_text}\n\n"
+                    f"Constraints:\n"
+                    f"- No quiz format\n"
+                    f"- No numbered questions\n"
+                    f"- No A)/B)/C)/D) options\n"
+                    f"- No 'Correct Answer' label\n"
+                    f"- Give only a direct explanation"
+                )
+                answer = gpt.submit(
+                    strict_prompt, system_message=qa_system_message)
+
             # Remove markdown formatting
             answer = strip_markdown(answer)
 

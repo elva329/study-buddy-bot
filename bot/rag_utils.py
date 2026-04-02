@@ -45,28 +45,43 @@ def retrieve_relevant_chunks(query: str, chunks: List[Dict], top_k: int = 3) -> 
         'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they'
     }
 
-    # Extract meaningful (non-stop) words from query
-    query_words = set(
+    # Extract meaningful (non-stop) words from query while preserving order
+    ordered_query_words = [
         word.lower() for word in query.split()
         if word.lower() not in stop_words and len(word) > 2
-    )
+    ]
+    query_words = set(ordered_query_words)
+    query_phrase = " ".join(ordered_query_words)
 
     if not query_words:
         return []  # All words were stop words
 
     def calculate_relevance(chunk_text: str) -> int:
-        """Count matching meaningful keywords in chunk"""
+        """Score chunk by keyword overlap + exact phrase match bonus."""
         chunk_words = set(
             word.lower() for word in chunk_text.split()
             if word.lower() not in stop_words and len(word) > 2
         )
-        return len(query_words & chunk_words)
+        overlap = len(query_words & chunk_words)
+
+        # Strongly prefer chunks containing the full phrase, e.g. "machine learning".
+        phrase_bonus = 2 if query_phrase and query_phrase in chunk_text.lower() else 0
+        return overlap + phrase_bonus
 
     # Score each chunk
     scored_chunks = []
+    min_overlap = 1 if len(query_words) <= 1 else 2
+
     for chunk in chunks:
         score = calculate_relevance(chunk['text'])
-        if score >= 1:  # Require at least 1 meaningful keyword match
+        chunk_words = set(
+            word.lower() for word in chunk['text'].split()
+            if word.lower() not in stop_words and len(word) > 2
+        )
+        overlap = len(query_words & chunk_words)
+
+        # For multi-keyword questions, require stronger overlap to avoid generic matches.
+        if overlap >= min_overlap:
             scored_chunks.append((chunk, score))
 
     # Sort by relevance (descending) and return top K
