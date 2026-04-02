@@ -974,7 +974,9 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Set user in ask mode
     user_ask_mode[user_id] = True
     log_event(user_id, 'ask_started', None)
-    await update.message.reply_text("Please provide your question")
+    await update.message.reply_text(
+        "Please provide your question. You can continue asking follow-up questions in this mode."
+    )
 
 
 async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1151,7 +1153,6 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                     'last_answer': answer,
                     'chunks': relevant_chunks
                 }
-                user_ask_mode.pop(user_id, None)
                 return
 
         # No relevant chunks or document says no answer - search internet
@@ -1164,11 +1165,8 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
             'answer_excerpt': db_excerpt(internet_result, 500),
         })
 
-        user_ask_mode.pop(user_id, None)
-
     except Exception as e:
         await update.message.reply_text(f"Error processing your question: {e}")
-        user_ask_mode.pop(user_id, None)
 
 
 def main():
