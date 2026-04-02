@@ -1,5 +1,6 @@
 import os
 import shutil
+import re
 from typing import List, Dict, Tuple
 
 
@@ -45,9 +46,12 @@ def retrieve_relevant_chunks(query: str, chunks: List[Dict], top_k: int = 3) -> 
         'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they'
     }
 
+    def normalize_text(text: str) -> str:
+        return re.sub(r'[^a-z0-9\s]+', ' ', text.lower())
+
     # Extract meaningful (non-stop) words from query while preserving order
     ordered_query_words = [
-        word.lower() for word in query.split()
+        word.lower() for word in normalize_text(query).split()
         if word.lower() not in stop_words and len(word) > 2
     ]
     query_words = set(ordered_query_words)
@@ -57,16 +61,30 @@ def retrieve_relevant_chunks(query: str, chunks: List[Dict], top_k: int = 3) -> 
         return []  # All words were stop words
 
     def calculate_relevance(chunk_text: str) -> int:
-        """Score chunk by keyword overlap + exact phrase match bonus."""
+        """Score chunk by keyword overlap + exact phrase/heading match bonus."""
+        normalized_chunk = normalize_text(chunk_text)
         chunk_words = set(
-            word.lower() for word in chunk_text.split()
+            word.lower() for word in normalized_chunk.split()
             if word.lower() not in stop_words and len(word) > 2
         )
         overlap = len(query_words & chunk_words)
 
         # Strongly prefer chunks containing the full phrase, e.g. "machine learning".
-        phrase_bonus = 2 if query_phrase and query_phrase in chunk_text.lower() else 0
-        return overlap + phrase_bonus
+        phrase_bonus = 3 if query_phrase and query_phrase in normalized_chunk else 0
+
+        # Lecture notes often have the key phrase in a heading/caption.
+        heading_bonus = 2 if normalized_chunk.startswith(
+            query_phrase) or f"{query_phrase}:" in normalized_chunk else 0
+
+        # Favor chunks where the query terms appear close together.
+        proximity_bonus = 0
+        if len(ordered_query_words) >= 2:
+            positions = [normalized_chunk.find(
+                word) for word in ordered_query_words if word in normalized_chunk]
+            if len(positions) >= 2 and max(positions) - min(positions) < 120:
+                proximity_bonus = 1
+
+        return overlap + phrase_bonus + heading_bonus + proximity_bonus
 
     # Score each chunk
     scored_chunks = []
@@ -74,8 +92,9 @@ def retrieve_relevant_chunks(query: str, chunks: List[Dict], top_k: int = 3) -> 
 
     for chunk in chunks:
         score = calculate_relevance(chunk['text'])
+        normalized_chunk = normalize_text(chunk['text'])
         chunk_words = set(
-            word.lower() for word in chunk['text'].split()
+            word.lower() for word in normalized_chunk.split()
             if word.lower() not in stop_words and len(word) > 2
         )
         overlap = len(query_words & chunk_words)
@@ -83,6 +102,13 @@ def retrieve_relevant_chunks(query: str, chunks: List[Dict], top_k: int = 3) -> 
         # For multi-keyword questions, require stronger overlap to avoid generic matches.
         if overlap >= min_overlap:
             scored_chunks.append((chunk, score))
+
+    # If the query looks like a specific phrase and we found nothing, relax once but still rank.
+    if not scored_chunks and query_phrase:
+        for chunk in chunks:
+            score = calculate_relevance(chunk['text'])
+            if score > 0:
+                scored_chunks.append((chunk, score))
 
     # Sort by relevance (descending) and return top K
     scored_chunks.sort(key=lambda x: x[1], reverse=True)

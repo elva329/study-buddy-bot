@@ -1201,14 +1201,16 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                 }
                 return
 
-        # No relevant chunks or document says no answer - search internet
-        internet_result = search_internet(question)
-
-        response = f"Could not find related answers from your uploaded docs.\n\nHere is the answer from internet search\n\n{internet_result}"
+        # No confident match in uploaded docs.
+        response = (
+            "I found uploaded documents, but I couldn't confidently match that question to a specific section. "
+            "Try asking with more exact keywords from the document title or the topic heading."
+        )
         await update.message.reply_text(response)
         log_message(user_id, response, sender='bot')
-        log_event(user_id, 'ask_answered_from_internet', {
-            'answer_excerpt': db_excerpt(internet_result, 500),
+        log_event(user_id, 'ask_no_confident_match', {
+            'question_excerpt': db_excerpt(question, 300),
+            'uploaded_file_count': len(chunks),
         })
 
     except Exception as e:
