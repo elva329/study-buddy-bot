@@ -475,9 +475,42 @@ logging.basicConfig(
 )
 
 
+def reset_user_session(user_id):
+    global uploaded_files, upload_batch_timer
+
+    if upload_batch_timer is not None and not upload_batch_timer.done():
+        upload_batch_timer.cancel()
+    upload_batch_timer = None
+    uploaded_files.clear()
+
+    user_quiz_prefs.pop(user_id, None)
+    user_quiz_state.pop(user_id, None)
+    user_ask_mode.pop(user_id, None)
+    user_ask_context.pop(user_id, None)
+
+    clear_uploads()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    files_before_clear = list_uploaded_files()
+    log_event(user_id, 'session_start_requested', {
+        'uploaded_files_before_clear': files_before_clear,
+    })
+
+    try:
+        reset_user_session(user_id)
+        log_event(user_id, 'session_start_completed', {
+            'cleared_file_count': len(files_before_clear),
+        })
+    except Exception as e:
+        await update.message.reply_text(f"Error starting new session: {e}")
+        log_event(user_id, 'session_start_failed', {'error': str(e)})
+        return
+
     await update.message.reply_text(
         'Hello! I am your Study Buddy Bot.\n\n'
+        'A new session has been started. Previous uploaded documents were cleared.\n\n'
         'I can help you study by:\n'
         '• Uploading PDF files for context\n'
         '• Creating multiple-choice quizzes from your materials\n'
@@ -873,26 +906,16 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def endsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear all uploaded documents to start a new session"""
     user_id = update.message.from_user.id
+    files_before_clear = list_uploaded_files()
     log_event(user_id, 'session_end_requested', {
-        'uploaded_files_before_clear': list_uploaded_files(),
+        'uploaded_files_before_clear': files_before_clear,
     })
 
-    # Import clear_uploads from rag_utils
-    from bot.rag_utils import clear_uploads
-
     try:
-        global uploaded_files, upload_batch_timer
-        if upload_batch_timer is not None and not upload_batch_timer.done():
-            upload_batch_timer.cancel()
-        upload_batch_timer = None
-        uploaded_files.clear()
-
-        user_quiz_prefs.pop(user_id, None)
-        user_quiz_state.pop(user_id, None)
-        user_ask_mode.pop(user_id, None)
-        user_ask_context.pop(user_id, None)
-
-        clear_uploads()
+        reset_user_session(user_id)
+        log_event(user_id, 'session_end_completed', {
+            'cleared_file_count': len(files_before_clear),
+        })
         await update.message.reply_text(
             "Session ended. All uploaded documents have been cleared.\n\n"
             "You can now upload new documents for your next session."
@@ -906,32 +929,40 @@ async def endsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     log_event(user_id, 'progress_requested', None)
-    total_quizzes, avg_score, best_score, worst_score, weak_topics = get_quiz_stats(
-        user_id)
-    quiz_history = get_quiz_history(user_id, limit=5)
-    if total_quizzes == 0:
+    try:
+        total_quizzes, avg_score, best_score, worst_score, weak_topics = get_quiz_stats(
+            user_id)
+        quiz_history = get_quiz_history(user_id, limit=5)
+        if total_quizzes == 0:
+            await update.message.reply_text(
+                "No quiz history found yet.\n\n"
+                "Take a quiz with /quiz to start tracking your progress!"
+            )
+            return
+
+        # Format worst score display
+        worst_score_text = f"{worst_score}%"
+        if weak_topics and weak_topics != 'N/A':
+            worst_score_text = f"{worst_score}% (Topic: {weak_topics})"
+
+        msg = f"📊 Quiz History\n\n"
+        msg += f"📖 Total Quizzes Taken: {total_quizzes}\n"
+        msg += f"🎯 Average Score: {avg_score}%\n"
+        msg += f"🏆 Best Score: {best_score}%\n"
+        msg += f"📉 Worst Performance: {worst_score_text}\n\n"
+        msg += f"You have completed {total_quizzes} quiz sessions.\n\n"
+        msg += "Recent attempts:\n"
+        for i, (ts, total) in enumerate(quiz_history, 1):
+            ts_text = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+            dt = ts_text.split('T')[0].split(' ')[0]
+            msg += f"{i}. {dt}: {total} questions\n"
+
+        await update.message.reply_text(msg)
+    except Exception as e:
+        log_event(user_id, 'progress_failed', {'error': str(e)})
         await update.message.reply_text(
-            "No quiz history found yet.\n\n"
-            "Take a quiz with /quiz to start tracking your progress!"
+            "I couldn't fetch your progress right now. Please try again in a moment."
         )
-        return
-
-    # Format worst score display
-    worst_score_text = f"{worst_score}%"
-    if weak_topics and weak_topics != 'N/A':
-        worst_score_text = f"{worst_score}% (Topic: {weak_topics})"
-
-    msg = f"📊 Quiz History\n\n"
-    msg += f"📖 Total Quizzes Taken: {total_quizzes}\n"
-    msg += f"🎯 Average Score: {avg_score}%\n"
-    msg += f"🏆 Best Score: {best_score}%\n"
-    msg += f"📉 Worst Performance: {worst_score_text}\n\n"
-    msg += f"You have completed {total_quizzes} quiz sessions.\n\n"
-    msg += "Recent attempts:\n"
-    for i, (ts, total) in enumerate(quiz_history, 1):
-        dt = ts.split('T')[0] if 'T' in ts else str(ts)[:10]
-        msg += f"{i}. {dt}: {total} questions\n"
-    await update.message.reply_text(msg)
 
 
 # --- Q&A Command with RAG ---
