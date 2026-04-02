@@ -458,13 +458,20 @@ def get_telegram_token():
 TELEGRAM_TOKEN = get_telegram_token()
 
 LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
 LOG_PATH = os.path.join(LOG_DIR, 'bot.log')
+
+os.makedirs(LOG_DIR, exist_ok=True)
+
+handlers = [logging.StreamHandler()]
+try:
+    handlers.insert(0, logging.FileHandler(LOG_PATH))
+except OSError as exc:
+    print(f'[Logging Warning] File logging disabled: {exc}')
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()]
+    handlers=handlers
 )
 
 
