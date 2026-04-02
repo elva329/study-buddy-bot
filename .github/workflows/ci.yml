@@ -95,8 +95,26 @@ jobs:
       - name: Deploy application
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-          cd ~/study-buddy-bot
-          git pull origin main
+          # Install dependencies if not already present
+          if ! command -v git &> /dev/null; then
+            echo "Installing git..."
+            sudo yum install -y git
+          fi
+          
+          if ! command -v docker &> /dev/null; then
+            echo "Installing Docker..."
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -aG docker $(whoami)
+          fi
+          
+          # Clone or update repository
+          if [ ! -d ~/study-buddy-bot ]; then
+            cd ~ && git clone https://github.com/${{ github.repository }}.git
+          else
+            cd ~/study-buddy-bot && git pull origin main
+          fi
 
           # Build and restart the service using Docker Compose
           docker compose down || true
