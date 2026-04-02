@@ -1,9 +1,8 @@
-version: '3.8'
 services:
   bot:
     build: .
     env_file:
-      - config/.env
+      - .env
     environment:
       DATABASE_URL: postgresql://studybuddy:studybuddy@db:5432/studybuddy
     ports:

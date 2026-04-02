@@ -125,15 +125,15 @@ jobs:
             fi
 
             # Prepare deployment directory and clear old code, but keep .env
-            mkdir -p ~/study-buddy-bot/config
+            mkdir -p ~/study-buddy-bot
 
             # Preserve the compose env file if it already exists
-            if [ -f ~/study-buddy-bot/config/.env ]; then
-              echo "Preserving existing config/.env file..."
-              cp ~/study-buddy-bot/config/.env /tmp/study-buddy-bot.env.backup
+            if [ -f ~/study-buddy-bot/.env ]; then
+              echo "Preserving existing .env file..."
+              cp ~/study-buddy-bot/.env /tmp/study-buddy-bot.env.backup
             fi
 
-            find ~/study-buddy-bot -mindepth 1 -maxdepth 1 ! -name 'config' -exec rm -rf {} +
+            find ~/study-buddy-bot -mindepth 1 -maxdepth 1 ! -name '.env' -exec rm -rf {} +
 
             # Receive the latest code from GitHub Actions
             echo "Deploying latest code bundle..."
@@ -142,7 +142,7 @@ jobs:
 
             # Restore compose env file if it was backed up
             if [ -f /tmp/study-buddy-bot.env.backup ]; then
-              mv /tmp/study-buddy-bot.env.backup ~/study-buddy-bot/config/.env
+              mv /tmp/study-buddy-bot.env.backup ~/study-buddy-bot/.env
             fi
 
             # Ensure we're in the right directory
