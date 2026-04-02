@@ -1113,6 +1113,14 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
     log_event(user_id, 'ask_question_received', {
               'question_excerpt': db_excerpt(question, 300)})
 
+    def is_acronym_query(text: str) -> bool:
+        words = [w for w in re.findall(r'[A-Za-z]{2,6}', text) if w.lower() not in {
+            'the', 'and', 'for', 'with', 'what', 'when', 'where', 'which', 'why', 'how', 'what', 'is', 'are', 'was', 'were', 'a', 'an', 'of', 'to', 'in'
+        }]
+        return len(words) == 1 and len(words[0]) <= 6
+
+    acronym_query = is_acronym_query(question)
+
     try:
         # Extract chunks with metadata from all uploaded PDFs
         chunks = extract_texts_with_metadata(UPLOAD_DIR)
@@ -1200,6 +1208,27 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                     'chunks': relevant_chunks
                 }
                 return
+
+        # Acronym questions should fall back to the internet if the docs don't contain a match.
+        if acronym_query:
+            internet_result = search_internet(question)
+            response = (
+                "I couldn't find a matching acronym definition in your uploaded docs. "
+                "Here is a general answer from internet search.\n\n"
+                f"{internet_result}"
+            )
+            await update.message.reply_text(response)
+            log_message(user_id, response, sender='bot')
+            log_event(user_id, 'ask_answered_from_internet', {
+                'answer_excerpt': db_excerpt(internet_result, 500),
+                'reason': 'acronym_no_doc_match',
+            })
+            user_ask_context[user_id] = {
+                'last_question': question,
+                'last_answer': internet_result,
+                'chunks': [],
+            }
+            return
 
         # No confident match in uploaded docs.
         response = (
