@@ -280,6 +280,14 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
         # Strip markdown
         plan_text = strip_markdown(plan_text)
 
+        def is_separator_row(parts):
+            """Return True for rows that are just separators like --- or blank cells."""
+            if not parts:
+                return True
+            normalized = [p.strip().replace('-', '').replace('=', '')
+                          for p in parts]
+            return all(not cell for cell in normalized)
+
         # Helper function to wrap text for table cells
         def wrap_text(text, max_width=12):
             """Wrap text to fit in table cells with proper line breaks"""
@@ -319,11 +327,14 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
                 header_found = True
                 # Parse header - split by common delimiters
                 parts = [p.strip() for p in line.replace('\t', '|').split('|')]
-                table_data.append(parts)
+                if not is_separator_row(parts):
+                    table_data.append(parts)
             elif header_found and line:
                 # Parse data rows
                 parts = [p.strip() for p in line.replace('\t', '|').split('|')]
                 if len(parts) >= 2:  # Make sure we have meaningful data
+                    if is_separator_row(parts):
+                        continue
                     # Pre-filter: remove rows with only empty cells, "--", or whitespace
                     cleaned_parts = []
                     for p in parts:
@@ -338,7 +349,7 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
                     # (time column + at least one topic)
                     content_count = sum(
                         1 for p in cleaned_parts[1:] if p and p.strip())
-                    if content_count >= 1 and cleaned_parts[0] and cleaned_parts[0].strip():
+                    if content_count >= 1 and cleaned_parts[0] and cleaned_parts[0].strip() and cleaned_parts[0].strip() not in ('---', '--'):
                         table_data.append(cleaned_parts)
 
         # Normalize the final slot so it always shows a wrap-up / planning block
@@ -372,9 +383,11 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
             filtered_table = [table_data[0]]  # Keep header
             for row in table_data[1:]:
                 # Check if row has any real content besides the time slot
-                has_content = any(row[j].strip()
-                                  for j in range(1, len(row)) if row[j])
-                if has_content:
+                has_content = any(
+                    row[j].strip() and row[j].strip() not in ('---', '--')
+                    for j in range(1, len(row)) if row[j]
+                )
+                if has_content and row[0].strip() not in ('---', '--'):
                     filtered_table.append(row)
             table_data = filtered_table if len(
                 filtered_table) > 1 else table_data
