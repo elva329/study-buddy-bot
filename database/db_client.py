@@ -1,6 +1,7 @@
 # Store quiz session metadata (for progress tracking, replaces user_progress.json)
 import configparser
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
 
@@ -27,8 +28,8 @@ def log_quiz_attempt_db(user_id, num_questions, timestamp=None):
         ''')
         # Insert attempt
         if not timestamp:
-            timestamp = datetime.utcnow().isoformat() if DB_URL.startswith(
-                'sqlite') else datetime.utcnow()
+            timestamp = datetime.now(timezone.utc).isoformat() if DB_URL.startswith(
+                'sqlite') else datetime.now(timezone.utc)
         cur.execute(
             'INSERT INTO quiz_attempts (user_id, num_questions, timestamp) VALUES (?, ?, ?)' if DB_URL.startswith('sqlite')
             else 'INSERT INTO quiz_attempts (user_id, num_questions, timestamp) VALUES (%s, %s, %s)',
@@ -112,7 +113,7 @@ if DB_URL.startswith('sqlite'):
         return 'SELECT topic, SUM(correct), SUM(total) FROM topic_scores WHERE user_id = ? GROUP BY topic'
 
     def get_current_timestamp():
-        return datetime.utcnow().isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
 else:
     import psycopg2
@@ -142,7 +143,7 @@ else:
         return 'SELECT topic, SUM(correct), SUM(total) FROM topic_scores WHERE user_id = %s GROUP BY topic'
 
     def get_current_timestamp():
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
 
 
 def get_quiz_history(user_id, limit=5):
@@ -179,6 +180,52 @@ def log_message(user_id, message, sender):
         print(f"[DB Error - log_message] {e}")
 
 
+def log_event(user_id, event_type, payload=None):
+    """Store a lightweight bot event for tracing and debugging."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        payload_text = json.dumps(
+            payload, ensure_ascii=False) if payload is not None else None
+
+        if DB_URL.startswith('sqlite'):
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    event_type TEXT,
+                    payload TEXT,
+                    timestamp TEXT
+                )
+            ''')
+            cur.execute(
+                'INSERT INTO events (user_id, event_type, payload, timestamp) VALUES (?, ?, ?, ?)',
+                (user_id, event_type, payload_text,
+                 datetime.now(timezone.utc).isoformat())
+            )
+        else:
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    event_type VARCHAR(64),
+                    payload TEXT,
+                    timestamp TIMESTAMP
+                )
+            ''')
+            cur.execute(
+                'INSERT INTO events (user_id, event_type, payload, timestamp) VALUES (%s, %s, %s, %s)',
+                (user_id, event_type, payload_text, datetime.now(timezone.utc))
+            )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB Error - log_event] {e}")
+
+
 def log_quiz_score(user_id, score, total, percent, topic_scores=None):
     """Store quiz score in the database for progress tracking"""
     try:
@@ -211,7 +258,8 @@ def log_quiz_score(user_id, score, total, percent, topic_scores=None):
             # Insert overall quiz score
             cur.execute(
                 'INSERT INTO quiz_scores (user_id, score, total, percent, timestamp) VALUES (?, ?, ?, ?, ?)',
-                (user_id, score, total, percent, datetime.utcnow().isoformat())
+                (user_id, score, total, percent,
+                 datetime.now(timezone.utc).isoformat())
             )
         else:
             cur.execute('''
@@ -238,7 +286,7 @@ def log_quiz_score(user_id, score, total, percent, topic_scores=None):
             # Insert overall quiz score
             cur.execute(
                 'INSERT INTO quiz_scores (user_id, score, total, percent, timestamp) VALUES (%s, %s, %s, %s, %s)',
-                (user_id, score, total, percent, datetime.utcnow())
+                (user_id, score, total, percent, datetime.now(timezone.utc))
             )
 
         # Insert per-topic stats if provided
@@ -248,12 +296,13 @@ def log_quiz_score(user_id, score, total, percent, topic_scores=None):
                     cur.execute(
                         'INSERT INTO topic_scores (user_id, topic, correct, total, timestamp) VALUES (?, ?, ?, ?, ?)',
                         (user_id, topic, correct, total_q,
-                         datetime.utcnow().isoformat())
+                         datetime.now(timezone.utc).isoformat())
                     )
                 else:
                     cur.execute(
                         'INSERT INTO topic_scores (user_id, topic, correct, total, timestamp) VALUES (%s, %s, %s, %s, %s)',
-                        (user_id, topic, correct, total_q, datetime.utcnow())
+                        (user_id, topic, correct, total_q,
+                         datetime.now(timezone.utc))
                     )
 
         conn.commit()
@@ -305,3 +354,23 @@ def get_quiz_stats(user_id):
     except Exception as e:
         print(f"[DB Error - get_quiz_stats] {e}")
         return 0, 0, 0, 0, 'N/A'
+
+
+def get_db_overview():
+    """Return lightweight counts for monitoring and health endpoints."""
+    tables = ['messages', 'events', 'quiz_attempts',
+              'quiz_scores', 'topic_scores']
+    counts = {}
+
+    for table in tables:
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(f'SELECT COUNT(*) FROM {table}')
+            counts[table] = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+        except Exception:
+            counts[table] = 0
+
+    return counts

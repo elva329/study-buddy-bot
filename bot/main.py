@@ -6,8 +6,10 @@ import sys
 import logging
 import requests
 import configparser
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from io import BytesIO
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -17,7 +19,16 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 from bot.pdf_utils import extract_texts_from_all_pdfs, extract_text_from_pdf, extract_texts_with_metadata
 from bot.rag_utils import save_uploaded_file, list_uploaded_files, retrieve_relevant_chunks, clear_uploads
-from database.db_client import log_message, log_quiz_score, get_quiz_stats, get_quiz_history, log_quiz_attempt_db, get_user_progress_db
+from database.db_client import (
+    log_event,
+    log_message,
+    log_quiz_score,
+    get_db_overview,
+    get_quiz_stats,
+    get_quiz_history,
+    log_quiz_attempt_db,
+    get_user_progress_db,
+)
 
 matplotlib.use('Agg')
 
@@ -25,6 +36,7 @@ matplotlib.use('Agg')
 async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     files = list_uploaded_files()
+    log_event(user_id, 'summarize_requested', {'file_count': len(files)})
 
     if not files:
         await update.message.reply_text("No uploaded notes found. Please upload PDF files first.")
@@ -41,14 +53,21 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = extract_text_from_pdf(pdf_path)
             if not text.strip():
                 await update.message.reply_text(f"Could not extract text from {fname}.")
+                log_event(user_id, 'summarize_empty_pdf', {'filename': fname})
                 continue
             prompt = f"Summarize the following study material in 5 concise bullet points for university students.\n\nMaterial:\n{text[:3000]}"
             summary = gpt.submit(prompt)
             # Remove markdown formatting
             summary = strip_markdown(summary)
             await update.message.reply_text(f"{fname}:\n{summary}")
+            log_event(user_id, 'summarize_completed', {
+                'filename': fname,
+                'summary_excerpt': db_excerpt(summary, 800),
+            })
         except Exception as e:
             await update.message.reply_text(f"Error summarizing {fname}: {e}")
+            log_event(user_id, 'summarize_failed', {
+                      'filename': fname, 'error': str(e)})
 
 
 # Helper to log quiz attempts
@@ -57,6 +76,61 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Store quiz session metadata in DB (replaces JSON)
 def log_quiz_attempt(user_id, num_questions):
     log_quiz_attempt_db(user_id, num_questions)
+
+
+def db_excerpt(text, limit=500):
+    if text is None:
+        return None
+    return " ".join(str(text).split())[:limit]
+
+
+class MonitoringHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        uptime_seconds = int(
+            (datetime.now(timezone.utc) - BOT_START_TIME).total_seconds())
+
+        if self.path == '/health':
+            self._send_json(200, {
+                'status': 'ok',
+                'uptime_seconds': uptime_seconds,
+                'uploaded_files': len(list_uploaded_files()),
+            })
+            return
+
+        if self.path == '/metrics':
+            self._send_json(200, {
+                'uptime_seconds': uptime_seconds,
+                'database': get_db_overview(),
+                'active_quiz_sessions': len(user_quiz_state),
+                'active_ask_sessions': len(user_ask_mode),
+            })
+            return
+
+        self._send_json(404, {'error': 'not found'})
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_monitoring_server():
+    port = int(os.getenv('HEALTH_PORT', '8081'))
+    try:
+        server = HTTPServer(('0.0.0.0', port), MonitoringHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logging.getLogger(__name__).info(
+            "Monitoring server started on port %s", port)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Monitoring server unavailable on port %s: %s", port, exc)
 
 # Helper to get user progress
 
@@ -71,6 +145,7 @@ uploaded_files = []
 upload_batch_timer = None
 
 gpt = None
+BOT_START_TIME = datetime.now(timezone.utc)
 
 # Always load .env from project root
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -382,11 +457,14 @@ def get_telegram_token():
 
 TELEGRAM_TOKEN = get_telegram_token()
 
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_PATH = os.path.join(LOG_DIR, 'bot.log')
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[logging.FileHandler(os.path.join(
-        PROJECT_ROOT, 'logs', 'bot.log')), logging.StreamHandler()]
+    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()]
 )
 
 
@@ -411,6 +489,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     user_id = update.message.from_user.id
     log_message(user_id, user_message, sender='user')
+    log_event(user_id, 'message_received', {
+              'message_excerpt': db_excerpt(user_message, 300)})
     global gpt
 
     # Use all PDFs for context
@@ -425,6 +505,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Remove markdown formatting
     response = strip_markdown(response)
     log_message(user_id, response, sender='bot')
+    log_event(user_id, 'message_replied', {
+        'response_excerpt': db_excerpt(response, 500),
+        'used_pdf_context': bool(context_text.strip()),
+    })
     await update.message.reply_text(response)
 
 
@@ -436,6 +520,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         file_bytes = await file.download_as_bytearray()
         file_path = save_uploaded_file(file_bytes, document.file_name)
+        log_event(user_id, 'pdf_uploaded', {
+            'filename': document.file_name,
+            'saved_path': os.path.basename(file_path),
+        })
         global uploaded_files, upload_batch_timer
         uploaded_files.append(document.file_name)
 
@@ -605,6 +693,12 @@ async def finish_quiz(update, context, user_id):
     score = state.get('score', 0)
     total = state.get('amount', 0)
     percent = int(100 * score / total) if total > 0 else 0
+    log_quiz_score(user_id, score, total, percent)
+    log_event(user_id, 'quiz_completed', {
+        'score': score,
+        'total': total,
+        'percent': percent,
+    })
 
     # Create simple review - just questions with correct answers
     review = "Quiz Review\n\n"
@@ -659,6 +753,9 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 prefs["amount"] = num_questions
                 prefs["step"] = "in_progress"
+                log_quiz_attempt(user_id, num_questions)
+                log_event(user_id, 'quiz_started', {
+                          'num_questions': num_questions})
 
                 # Use the SAME pdf_texts that was determined at the start of this function
                 # This ensures consistency throughout the entire quiz session
@@ -729,6 +826,11 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'q': question
             })
             state['current'] += 1
+            log_event(user_id, 'quiz_answer_submitted', {
+                'question_index': state['current'],
+                'user_answer': user_answer,
+                'correct': correct,
+            })
 
             # Send feedback
             await update.message.reply_text(feedback)
@@ -764,11 +866,25 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def endsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear all uploaded documents to start a new session"""
     user_id = update.message.from_user.id
+    log_event(user_id, 'session_end_requested', {
+        'uploaded_files_before_clear': list_uploaded_files(),
+    })
 
     # Import clear_uploads from rag_utils
     from bot.rag_utils import clear_uploads
 
     try:
+        global uploaded_files, upload_batch_timer
+        if upload_batch_timer is not None and not upload_batch_timer.done():
+            upload_batch_timer.cancel()
+        upload_batch_timer = None
+        uploaded_files.clear()
+
+        user_quiz_prefs.pop(user_id, None)
+        user_quiz_state.pop(user_id, None)
+        user_ask_mode.pop(user_id, None)
+        user_ask_context.pop(user_id, None)
+
         clear_uploads()
         await update.message.reply_text(
             "Session ended. All uploaded documents have been cleared.\n\n"
@@ -782,6 +898,7 @@ async def endsession(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    log_event(user_id, 'progress_requested', None)
     total_quizzes, avg_score, best_score, worst_score, weak_topics = get_quiz_stats(
         user_id)
     quiz_history = get_quiz_history(user_id, limit=5)
@@ -818,12 +935,14 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Set user in ask mode
     user_ask_mode[user_id] = True
+    log_event(user_id, 'ask_started', None)
     await update.message.reply_text("Please provide your question")
 
 
 async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate a weekly study plan based on uploaded documents"""
     user_id = update.message.from_user.id
+    log_event(user_id, 'plan_requested', None)
 
     try:
         # Extract all text from uploaded PDFs
@@ -880,11 +999,16 @@ async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=image_buffer,
                 caption=""
             )
+            log_event(user_id, 'plan_completed', {'format': 'image'})
         else:
             # Fallback to text format
             formatted_plan = format_study_plan_table(plan_content)
             await status_msg.edit_text("✅ Study plan generated!")
             await update.message.reply_text(formatted_plan)
+            log_event(user_id, 'plan_completed', {
+                'format': 'text',
+                'plan_excerpt': db_excerpt(formatted_plan, 800),
+            })
 
     except Exception as e:
         await update.message.reply_text(f"Error generating study plan: {e}")
@@ -917,6 +1041,9 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
     """Process the user's question in Q&A mode"""
     user_id = update.message.from_user.id
     question = update.message.text.strip()
+    log_message(user_id, question, sender='user')
+    log_event(user_id, 'ask_question_received', {
+              'question_excerpt': db_excerpt(question, 300)})
 
     try:
         # Extract chunks with metadata from all uploaded PDFs
@@ -974,6 +1101,11 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                     response += f"{i}. {chunk['filename']} (Page {chunk['page_num']})\n"
 
                 await update.message.reply_text(response)
+                log_message(user_id, response, sender='bot')
+                log_event(user_id, 'ask_answered_from_docs', {
+                    'source_count': len(relevant_chunks),
+                    'answer_excerpt': db_excerpt(answer, 500),
+                })
 
                 # Store context for follow-up questions
                 user_ask_context[user_id] = {
@@ -989,6 +1121,10 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
 
         response = f"Could not find related answers from your uploaded docs.\n\nHere is the answer from internet search\n\n{internet_result}"
         await update.message.reply_text(response)
+        log_message(user_id, response, sender='bot')
+        log_event(user_id, 'ask_answered_from_internet', {
+            'answer_excerpt': db_excerpt(internet_result, 500),
+        })
 
         user_ask_mode.pop(user_id, None)
 
@@ -1000,6 +1136,7 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
 def main():
     global gpt
     gpt = ChatGPT(config)
+    start_monitoring_server()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('quiz', quiz))

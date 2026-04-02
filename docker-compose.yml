@@ -4,8 +4,10 @@ services:
     build: .
     env_file:
       - config/.env
+    environment:
+      DATABASE_URL: postgresql://studybuddy:studybuddy@db:5432/studybuddy
     ports:
-      - "8000:8000"
+      - "8081:8081"
     depends_on:
       - db
   db:
