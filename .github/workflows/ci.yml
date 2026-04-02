@@ -124,9 +124,11 @@ jobs:
             else
               echo "Updating repository..."
               cd ~/study-buddy-bot
-              # Fetch latest changes and reset (cleaner than pull)
-              git fetch origin
+              # Fetch the latest remote state and hard reset to it
+              git fetch --prune origin
+              git checkout -B main origin/main
               git reset --hard origin/main
+              git clean -fd
             fi
             
             # Ensure we're in the right directory
