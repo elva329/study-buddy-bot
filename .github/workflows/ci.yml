@@ -94,20 +94,28 @@ jobs:
 
       - name: Deploy to EC2
         run: |
+          tar -czf /tmp/study-buddy-bot.tar.gz \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude=.venv \
+            --exclude=venv \
+            --exclude=logs \
+            --exclude=__pycache__ \
+            --exclude=.pytest_cache \
+            --exclude=.mypy_cache \
+            --exclude=test-ci.db \
+            -C "$GITHUB_WORKSPACE" .
+
+          scp -o StrictHostKeyChecking=no /tmp/study-buddy-bot.tar.gz \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/study-buddy-bot.tar.gz
+
           ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
-            # Install git if not present
-            if ! command -v git &> /dev/null; then
-              echo "Installing git..."
-              sudo dnf install -y git
-            fi
-            
             # Install Docker if not present
             if ! command -v docker &> /dev/null; then
               echo "Installing Docker..."
               sudo dnf install -y docker
               sudo systemctl start docker
               sudo systemctl enable docker
-              sudo usermod -aG docker $USER
             fi
             
             # Install Docker Compose plugin if not present
@@ -115,31 +123,30 @@ jobs:
               echo "Installing Docker Compose plugin..."
               sudo dnf install -y docker-compose-plugin
             fi
-            
-            # Clone or update repository
-            if [ ! -d ~/study-buddy-bot ]; then
-              echo "Cloning repository..."
-              cd ~
-              git clone https://github.com/${{ github.repository }}.git study-buddy-bot
-            else
-              echo "Updating repository..."
-              cd ~/study-buddy-bot
-              # Fetch the latest remote state and hard reset to it
-              git fetch --prune origin
-              git checkout -B main origin/main
-              git reset --hard origin/main
-              git clean -fd
+
+            # Prepare deployment directory and clear old code, but keep .env
+            mkdir -p ~/study-buddy-bot/config
+
+            # Preserve the compose env file if it already exists
+            if [ -f ~/study-buddy-bot/config/.env ]; then
+              echo "Preserving existing config/.env file..."
+              cp ~/study-buddy-bot/config/.env /tmp/study-buddy-bot.env.backup
             fi
-            
+
+            find ~/study-buddy-bot -mindepth 1 -maxdepth 1 ! -name 'config' -exec rm -rf {} +
+
+            # Receive the latest code from GitHub Actions
+            echo "Deploying latest code bundle..."
+            tar -xzf /tmp/study-buddy-bot.tar.gz -C ~/study-buddy-bot
+            rm -f /tmp/study-buddy-bot.tar.gz
+
+            # Restore compose env file if it was backed up
+            if [ -f /tmp/study-buddy-bot.env.backup ]; then
+              mv /tmp/study-buddy-bot.env.backup ~/study-buddy-bot/config/.env
+            fi
+
             # Ensure we're in the right directory
             cd ~/study-buddy-bot
-            
-            # IMPORTANT: Preserve existing .env file
-            # Backup existing .env if it exists
-            if [ -f .env ]; then
-              echo "Preserving existing .env file..."
-              cp .env .env.backup
-            fi
             
             # Stop existing containers
             echo "Stopping existing containers..."
@@ -148,13 +155,6 @@ jobs:
             # Build and start containers
             echo "Building and starting containers..."
             docker compose up -d --build
-            
-            # Restore .env if it was overwritten (though compose shouldn't overwrite it)
-            if [ -f .env.backup ] && [ ! -f .env ]; then
-              mv .env.backup .env
-            elif [ -f .env.backup ]; then
-              rm .env.backup
-            fi
             
             # Clean up old images
             echo "Cleaning up old Docker images..."
