@@ -1,5 +1,8 @@
 name: CI and EC2 Deploy
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     branches:
@@ -24,11 +27,47 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run database smoke test
+      - name: Run database smoke check
         env:
           DATABASE_URL: sqlite:///./test-ci.db
         run: |
-          pytest -q tests/test_database.py
+          python - <<'PY'
+          import importlib
+          import os
+          import sys
+
+          sys.modules.pop('database.db_client', None)
+          import database.db_client as db_client
+          db_client = importlib.reload(db_client)
+
+          db_client.log_message(42, 'hello bot', 'user')
+          db_client.log_event(42, 'pdf_uploaded', {'filename': 'notes.pdf'})
+          db_client.log_quiz_attempt_db(42, 5)
+          db_client.log_quiz_score(42, 4, 5, 80, {'Databases': (3, 4)})
+
+          history = db_client.get_quiz_history(42, limit=5)
+          assert len(history) == 1 and history[0][1] == 5
+
+          total_quizzes, avg_score, best_score, worst_score, weak_topic = db_client.get_quiz_stats(42)
+          assert total_quizzes == 1
+          assert avg_score == 80
+          assert best_score == 80
+          assert worst_score == 80
+          assert weak_topic == 'Databases'
+
+          progress = db_client.get_user_progress_db(42)
+          assert len(progress) == 1
+          assert progress[0]['num_questions'] == 5
+
+          overview = db_client.get_db_overview()
+          assert overview['messages'] >= 1
+          assert overview['events'] >= 1
+          assert overview['quiz_attempts'] >= 1
+          assert overview['quiz_scores'] >= 1
+          assert overview['topic_scores'] >= 1
+
+          print('Database smoke check passed.')
+          PY
 
       - name: Build Docker image
         run: |
