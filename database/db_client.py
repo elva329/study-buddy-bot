@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
+from urllib.parse import quote_plus
 
 
 def log_quiz_attempt_db(user_id, num_questions, timestamp=None):
@@ -76,6 +77,25 @@ def get_db_url():
     db_url = os.getenv('DATABASE_URL')
     if db_url:
         return db_url
+
+    # Backward-compatible env support:
+    # - DB_HOST can be a full URL (e.g. postgresql://...)
+    # - or DB_HOST + DB_USER + DB_PASSWORD + DB_NAME can be composed
+    db_host = os.getenv('DB_HOST')
+    if db_host:
+        lowered = db_host.lower()
+        if lowered.startswith('postgresql://') or lowered.startswith('postgres://') or lowered.startswith('sqlite:///'):
+            return db_host
+
+        db_user = os.getenv('DB_USER')
+        db_password = os.getenv('DB_PASSWORD')
+        db_name = os.getenv('DB_NAME')
+        db_port = os.getenv('DB_PORT', '5432')
+        if db_user and db_password and db_name:
+            safe_user = quote_plus(db_user)
+            safe_password = quote_plus(db_password)
+            return f'postgresql://{safe_user}:{safe_password}@{db_host}:{db_port}/{db_name}'
+
     if 'database' in config and 'url' in config['database']:
         return config['database']['url']
     return 'sqlite:///studybuddy.db'
