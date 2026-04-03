@@ -7,6 +7,7 @@ import logging
 import requests
 import configparser
 import threading
+import time
 from datetime import datetime, timezone
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -84,6 +85,67 @@ def db_excerpt(text, limit=500):
     return " ".join(str(text).split())[:limit]
 
 
+REQUEST_WINDOW_SECONDS = int(os.getenv('REQUEST_WINDOW_SECONDS', '60'))
+MAX_REQUESTS_PER_WINDOW = int(os.getenv('MAX_REQUESTS_PER_WINDOW', '20'))
+MAX_DAILY_TOKENS = int(os.getenv('MAX_DAILY_TOKENS', '120000'))
+
+user_request_windows = {}
+llm_usage = {
+    'day': datetime.now(timezone.utc).date().isoformat(),
+    'calls': 0,
+    'failed_calls': 0,
+    'prompt_tokens': 0,
+    'completion_tokens': 0,
+    'total_tokens': 0,
+}
+
+
+def _ensure_llm_usage_day():
+    today = datetime.now(timezone.utc).date().isoformat()
+    if llm_usage['day'] != today:
+        llm_usage['day'] = today
+        llm_usage['calls'] = 0
+        llm_usage['failed_calls'] = 0
+        llm_usage['prompt_tokens'] = 0
+        llm_usage['completion_tokens'] = 0
+        llm_usage['total_tokens'] = 0
+
+
+def _record_llm_usage(usage_payload):
+    _ensure_llm_usage_day()
+    llm_usage['calls'] += 1
+    if not usage_payload:
+        return
+    llm_usage['prompt_tokens'] += int(
+        usage_payload.get('prompt_tokens', 0) or 0)
+    llm_usage['completion_tokens'] += int(
+        usage_payload.get('completion_tokens', 0) or 0)
+    llm_usage['total_tokens'] += int(usage_payload.get('total_tokens', 0) or 0)
+
+
+def _record_llm_failure():
+    _ensure_llm_usage_day()
+    llm_usage['failed_calls'] += 1
+
+
+def _is_daily_budget_exceeded():
+    _ensure_llm_usage_day()
+    return llm_usage['total_tokens'] >= MAX_DAILY_TOKENS
+
+
+def check_rate_limit(user_id):
+    now = time.time()
+    window_start = now - REQUEST_WINDOW_SECONDS
+    timestamps = user_request_windows.get(user_id, [])
+    timestamps = [ts for ts in timestamps if ts >= window_start]
+    if len(timestamps) >= MAX_REQUESTS_PER_WINDOW:
+        user_request_windows[user_id] = timestamps
+        return False
+    timestamps.append(now)
+    user_request_windows[user_id] = timestamps
+    return True
+
+
 class MonitoringHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code, payload):
         body = json.dumps(payload).encode('utf-8')
@@ -111,6 +173,16 @@ class MonitoringHandler(BaseHTTPRequestHandler):
                 'database': get_db_overview(),
                 'active_quiz_sessions': len(user_quiz_state),
                 'active_ask_sessions': len(user_ask_mode),
+                'llm_usage': {
+                    'day': llm_usage['day'],
+                    'calls': llm_usage['calls'],
+                    'failed_calls': llm_usage['failed_calls'],
+                    'prompt_tokens': llm_usage['prompt_tokens'],
+                    'completion_tokens': llm_usage['completion_tokens'],
+                    'total_tokens': llm_usage['total_tokens'],
+                    'daily_token_budget': MAX_DAILY_TOKENS,
+                    'budget_remaining': max(0, MAX_DAILY_TOKENS - llm_usage['total_tokens']),
+                },
             })
             return
 
@@ -186,6 +258,9 @@ class ChatGPT:
         )
 
     def submit(self, user_message: str, system_message: str = None):
+        if _is_daily_budget_exceeded():
+            return "Daily LLM token budget reached. Please try again tomorrow."
+
         if system_message is None:
             system_message = self.system_message
         messages = [
@@ -201,8 +276,11 @@ class ChatGPT:
         }
         response = requests.post(self.url, json=payload, headers=self.headers)
         if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content']
+            data = response.json()
+            _record_llm_usage(data.get('usage'))
+            return data['choices'][0]['message']['content']
         else:
+            _record_llm_failure()
             return "Error: " + response.text
 
 # --- Helper Functions ---
@@ -555,6 +633,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     user_id = update.message.from_user.id
+
+    if not check_rate_limit(user_id):
+        await update.message.reply_text("Rate limit exceeded. Please wait a minute and try again.")
+        log_event(user_id, 'rate_limit_rejected', {'path': 'handle_message'})
+        return
+
     log_message(user_id, user_message, sender='user')
     log_event(user_id, 'message_received', {
               'message_excerpt': db_excerpt(user_message, 300)})
@@ -1109,6 +1193,12 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
     """Process the user's question in Q&A mode"""
     user_id = update.message.from_user.id
     question = update.message.text.strip()
+
+    if not check_rate_limit(user_id):
+        await update.message.reply_text("Rate limit exceeded. Please wait a minute and try again.")
+        log_event(user_id, 'rate_limit_rejected', {'path': 'ask'})
+        return
+
     log_message(user_id, question, sender='user')
     log_event(user_id, 'ask_question_received', {
               'question_excerpt': db_excerpt(question, 300)})

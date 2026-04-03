@@ -4,21 +4,19 @@ services:
     command: ["python", "-m", "bot.main"]
     env_file:
       - .env
-    environment:
-      DATABASE_URL: postgresql://studybuddy:studybuddy@db:5432/studybuddy
     ports:
       - "8081:8081"
-    depends_on:
-      - db
+    restart: unless-stopped
   db:
     image: postgres:14
+    profiles:
+      - localdb
     environment:
-      POSTGRES_USER: studybuddy
-      POSTGRES_PASSWORD: studybuddy
-      POSTGRES_DB: studybuddy
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-studybuddy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-studybuddy}
+      POSTGRES_DB: ${POSTGRES_DB:-studybuddy}
     volumes:
       - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
 volumes:
   db_data:

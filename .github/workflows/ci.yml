@@ -74,6 +74,13 @@ jobs:
           print('Database smoke check passed.')
           PY
 
+      - name: Run test suite
+        env:
+          DATABASE_URL: sqlite:///./test-ci.db
+          TELEGRAM_BOT_TOKEN: test-token
+        run: |
+          pytest -q
+
       - name: Build Docker image
         run: |
           docker build -t study-buddy-bot:ci .
@@ -119,7 +126,7 @@ jobs:
             fi
             
             # Install Docker Compose plugin if not present
-            if ! docker compose version &> /dev/null; then
+            if ! sudo docker compose version &> /dev/null; then
               echo "Installing Docker Compose plugin..."
               sudo dnf install -y docker-compose-plugin
             fi
@@ -147,22 +154,25 @@ jobs:
 
             # Ensure we're in the right directory
             cd ~/study-buddy-bot
+
+            # Use cloud DB from .env by default; local db service is profile-gated.
+            export COMPOSE_PROFILES=""
             
             # Stop existing containers
             echo "Stopping existing containers..."
-            docker compose down || true
+            sudo docker compose down || true
             
-            # Build and start containers
-            echo "Building and starting containers..."
-            docker compose up -d --build
+            # Build and start bot container only (expects DATABASE_URL in .env)
+            echo "Building and starting bot container..."
+            sudo docker compose up -d --build bot
             
             # Clean up old images
             echo "Cleaning up old Docker images..."
-            docker image prune -f
+            sudo docker image prune -f
             
             # Show running containers
             echo "Container status:"
-            docker compose ps
+            sudo docker compose ps
             
             echo "✅ Deployment completed successfully!"
           EOF
