@@ -102,6 +102,14 @@ def get_db_url():
 
 
 DB_URL = get_db_url()
+REQUIRE_CLOUD_DB = os.getenv('REQUIRE_CLOUD_DB', 'false').lower() in (
+    '1', 'true', 'yes', 'on')
+
+if REQUIRE_CLOUD_DB and DB_URL.startswith('sqlite'):
+    raise RuntimeError(
+        'REQUIRE_CLOUD_DB is enabled but DB configuration resolved to sqlite. '
+        'Set DATABASE_URL or DB_HOST/DB_USER/DB_PASSWORD/DB_NAME for PostgreSQL.'
+    )
 
 # Backend selection for DB connection
 if DB_URL.startswith('sqlite'):
@@ -136,9 +144,8 @@ if DB_URL.startswith('sqlite'):
         return datetime.now(timezone.utc).isoformat()
 
 else:
-    import psycopg2
-
     def get_conn():
+        import psycopg2
         return psycopg2.connect(DB_URL)
 
     CREATE_TABLE = '''

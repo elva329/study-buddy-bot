@@ -4,6 +4,8 @@ services:
     command: ["python", "-m", "bot.main"]
     env_file:
       - .env
+    environment:
+      REQUIRE_CLOUD_DB: ${REQUIRE_CLOUD_DB:-true}
     ports:
       - "8081:8081"
     restart: unless-stopped
