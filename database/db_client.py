@@ -104,6 +104,7 @@ def get_db_url():
 DB_URL = get_db_url()
 REQUIRE_CLOUD_DB = os.getenv('REQUIRE_CLOUD_DB', 'false').lower() in (
     '1', 'true', 'yes', 'on')
+PASS_PERCENT_THRESHOLD = int(os.getenv('PASS_PERCENT_THRESHOLD', '60'))
 
 if REQUIRE_CLOUD_DB and DB_URL.startswith('sqlite'):
     raise RuntimeError(
@@ -135,13 +136,21 @@ if DB_URL.startswith('sqlite'):
         return 'SELECT timestamp, total FROM quiz_scores WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?'
 
     def get_quiz_stats_query():
-        return 'SELECT score, total, percent FROM quiz_scores WHERE user_id = ?'
-
-    def get_topic_stats_query():
-        return 'SELECT topic, SUM(correct), SUM(total) FROM topic_scores WHERE user_id = ? GROUP BY topic'
+        return 'SELECT score, total, percent, weak_topic, topic_breakdown FROM quiz_scores WHERE user_id = ?'
 
     def get_current_timestamp():
         return datetime.now(timezone.utc).isoformat()
+
+    def ensure_column_exists(conn, table_name, column_name, column_type):
+        cur = conn.cursor()
+        cur.execute(f'PRAGMA table_info({table_name})')
+        existing_columns = {row[1] for row in cur.fetchall()}
+        if column_name not in existing_columns:
+            cur.execute(
+                f'ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}'
+            )
+            conn.commit()
+        cur.close()
 
 else:
     def get_conn():
@@ -164,13 +173,137 @@ else:
         return 'SELECT timestamp, total FROM quiz_scores WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s'
 
     def get_quiz_stats_query():
-        return 'SELECT score, total, percent FROM quiz_scores WHERE user_id = %s'
-
-    def get_topic_stats_query():
-        return 'SELECT topic, SUM(correct), SUM(total) FROM topic_scores WHERE user_id = %s GROUP BY topic'
+        return 'SELECT score, total, percent, weak_topic, topic_breakdown FROM quiz_scores WHERE user_id = %s'
 
     def get_current_timestamp():
         return datetime.now(timezone.utc)
+
+    def ensure_column_exists(conn, table_name, column_name, column_type):
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = %s AND column_name = %s
+            ''',
+            (table_name, column_name)
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}'
+            )
+            conn.commit()
+        cur.close()
+
+
+def ensure_quiz_schema(conn):
+    cur = conn.cursor()
+
+    if DB_URL.startswith('sqlite'):
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS quiz_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                score INTEGER,
+                total INTEGER,
+                percent INTEGER,
+                passed INTEGER,
+                weak_topic TEXT,
+                topic_breakdown TEXT,
+                timestamp TEXT
+            )
+        ''')
+        conn.commit()
+        cur.close()
+        ensure_column_exists(conn, 'quiz_scores', 'passed', 'INTEGER')
+        ensure_column_exists(conn, 'quiz_scores', 'weak_topic', 'TEXT')
+        ensure_column_exists(conn, 'quiz_scores', 'topic_breakdown', 'TEXT')
+        return
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS quiz_scores (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            score INTEGER,
+            total INTEGER,
+            percent INTEGER,
+            passed INTEGER,
+            weak_topic TEXT,
+            topic_breakdown TEXT,
+            timestamp TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    cur.close()
+    ensure_column_exists(conn, 'quiz_scores', 'passed', 'INTEGER')
+    ensure_column_exists(conn, 'quiz_scores', 'weak_topic', 'TEXT')
+    ensure_column_exists(conn, 'quiz_scores', 'topic_breakdown', 'TEXT')
+
+
+def normalize_topic_scores(topic_scores):
+    if not topic_scores:
+        return None
+
+    normalized = {}
+    for topic, value in topic_scores.items():
+        if isinstance(value, dict):
+            correct = int(value.get('correct', 0) or 0)
+            total = int(value.get('total', 0) or 0)
+        else:
+            correct, total = value
+            correct = int(correct or 0)
+            total = int(total or 0)
+
+        normalized[topic] = {
+            'correct': correct,
+            'total': total,
+            'passed': calculate_passed(correct, total),
+        }
+
+    return normalized
+
+
+def serialize_topic_breakdown(topic_scores):
+    normalized = normalize_topic_scores(topic_scores)
+    if not normalized:
+        return None
+    return json.dumps(normalized, ensure_ascii=False)
+
+
+def extract_weak_topic_from_breakdown(topic_breakdown):
+    if not topic_breakdown:
+        return 'N/A'
+
+    if isinstance(topic_breakdown, str):
+        try:
+            topic_breakdown = json.loads(topic_breakdown)
+        except json.JSONDecodeError:
+            return 'N/A'
+
+    worst_topic = 'N/A'
+    min_percent = 101
+
+    for topic, value in topic_breakdown.items():
+        if isinstance(value, dict):
+            correct = value.get('correct', 0)
+            total = value.get('total', 0)
+        else:
+            correct, total = value
+
+        if total:
+            percent = 100 * int(correct) / int(total)
+            if percent < min_percent:
+                min_percent = percent
+                worst_topic = topic
+
+    return worst_topic
+
+
+def calculate_passed(score, total, threshold=PASS_PERCENT_THRESHOLD):
+    if total <= 0:
+        return 0
+    percent = (100 * score) / total
+    return 1 if percent >= threshold else 0
 
 
 def get_quiz_history(user_id, limit=5):
@@ -259,84 +392,33 @@ def log_quiz_score(user_id, score, total, percent, topic_scores=None):
         conn = get_conn()
         cur = conn.cursor()
 
-        # Create table for overall quiz scores
+        ensure_quiz_schema(conn)
+
+        passed = calculate_passed(score, total)
+        topic_breakdown = serialize_topic_breakdown(topic_scores)
+        weak_topic = extract_weak_topic_from_breakdown(topic_breakdown)
+
+        # Insert overall quiz score including pass/fail outcome
         if DB_URL.startswith('sqlite'):
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS quiz_scores (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    score INTEGER,
-                    total INTEGER,
-                    percent INTEGER,
-                    timestamp TEXT
-                )
-            ''')
-            # Create table for per-topic stats
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS topic_scores (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    topic TEXT,
-                    correct INTEGER,
-                    total INTEGER,
-                    timestamp TEXT
-                )
-            ''')
-            # Insert overall quiz score
             cur.execute(
-                'INSERT INTO quiz_scores (user_id, score, total, percent, timestamp) VALUES (?, ?, ?, ?, ?)',
-                (user_id, score, total, percent,
+                'INSERT INTO quiz_scores (user_id, score, total, percent, passed, weak_topic, topic_breakdown, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (user_id, score, total, percent, passed, weak_topic, topic_breakdown,
                  datetime.now(timezone.utc).isoformat())
             )
         else:
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS quiz_scores (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    score INTEGER,
-                    total INTEGER,
-                    percent INTEGER,
-                    timestamp TIMESTAMP
-                )
-            ''')
-            # Create table for per-topic stats
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS topic_scores (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    topic TEXT,
-                    correct INTEGER,
-                    total INTEGER,
-                    timestamp TIMESTAMP
-                )
-            ''')
-            # Insert overall quiz score
             cur.execute(
-                'INSERT INTO quiz_scores (user_id, score, total, percent, timestamp) VALUES (%s, %s, %s, %s, %s)',
-                (user_id, score, total, percent, datetime.now(timezone.utc))
+                'INSERT INTO quiz_scores (user_id, score, total, percent, passed, weak_topic, topic_breakdown, timestamp) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
+                (user_id, score, total, percent, passed, weak_topic,
+                 topic_breakdown, datetime.now(timezone.utc))
             )
-
-        # Insert per-topic stats if provided
-        if topic_scores:
-            for topic, (correct, total_q) in topic_scores.items():
-                if DB_URL.startswith('sqlite'):
-                    cur.execute(
-                        'INSERT INTO topic_scores (user_id, topic, correct, total, timestamp) VALUES (?, ?, ?, ?, ?)',
-                        (user_id, topic, correct, total_q,
-                         datetime.now(timezone.utc).isoformat())
-                    )
-                else:
-                    cur.execute(
-                        'INSERT INTO topic_scores (user_id, topic, correct, total, timestamp) VALUES (%s, %s, %s, %s, %s)',
-                        (user_id, topic, correct, total_q,
-                         datetime.now(timezone.utc))
-                    )
 
         conn.commit()
         cur.close()
         conn.close()
+        return True
     except Exception as e:
         print(f"[DB Error - log_quiz_score] {e}")
+        return False
 
 
 def get_quiz_stats(user_id):
@@ -350,11 +432,6 @@ def get_quiz_stats(user_id):
         cur.execute(query, (user_id,))
         rows = cur.fetchall()
 
-        # Query per-topic stats for the user
-        topic_query = get_topic_stats_query()
-        cur.execute(topic_query, (user_id,))
-        topic_rows = cur.fetchall()
-
         cur.close()
         conn.close()
 
@@ -367,15 +444,50 @@ def get_quiz_stats(user_id):
         best_score = max(percents)
         worst_score = min(percents)
 
-        # Find worst topic (lowest percent correct)
+        topic_totals = {}
+        fallback_weak_topics = []
+
+        for row in rows:
+            weak_topic = row[3] if len(row) > 3 else None
+            topic_breakdown = row[4] if len(row) > 4 else None
+
+            if weak_topic and weak_topic != 'N/A':
+                fallback_weak_topics.append(weak_topic)
+
+            if not topic_breakdown:
+                continue
+
+            if isinstance(topic_breakdown, str):
+                try:
+                    topic_breakdown = json.loads(topic_breakdown)
+                except json.JSONDecodeError:
+                    continue
+
+            for topic, value in topic_breakdown.items():
+                if isinstance(value, dict):
+                    correct = int(value.get('correct', 0) or 0)
+                    total_q = int(value.get('total', 0) or 0)
+                else:
+                    correct, total_q = value
+                    correct = int(correct or 0)
+                    total_q = int(total_q or 0)
+
+                if topic not in topic_totals:
+                    topic_totals[topic] = {'correct': 0, 'total': 0}
+                topic_totals[topic]['correct'] += correct
+                topic_totals[topic]['total'] += total_q
+
         worst_topic = 'N/A'
         min_percent = 101
-        for topic, correct, total_q in topic_rows:
-            if total_q and correct is not None:
-                percent = 100 * correct / total_q
+        for topic, totals in topic_totals.items():
+            if totals['total']:
+                percent = 100 * totals['correct'] / totals['total']
                 if percent < min_percent:
                     min_percent = percent
                     worst_topic = topic
+
+        if worst_topic == 'N/A' and fallback_weak_topics:
+            worst_topic = fallback_weak_topics[-1]
 
         return total_quizzes, avg_score, best_score, worst_score, worst_topic
     except Exception as e:
@@ -385,8 +497,7 @@ def get_quiz_stats(user_id):
 
 def get_db_overview():
     """Return lightweight counts for monitoring and health endpoints."""
-    tables = ['messages', 'events', 'quiz_attempts',
-              'quiz_scores', 'topic_scores']
+    tables = ['messages', 'events', 'quiz_attempts', 'quiz_scores']
     counts = {}
 
     for table in tables:

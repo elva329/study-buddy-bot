@@ -29,6 +29,19 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
     db_client.log_quiz_attempt_db(42, 5)
     db_client.log_quiz_score(42, 4, 5, 80, {'Databases': (3, 4)})
 
+    conn = db_client.get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT score, total, percent, passed, weak_topic, topic_breakdown FROM quiz_scores WHERE user_id = ?' if db_client.DB_URL.startswith(
+        'sqlite') else 'SELECT score, total, percent, passed, weak_topic, topic_breakdown FROM quiz_scores WHERE user_id = %s', (42,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    assert row is not None
+    assert row[3] == 1
+    assert row[4] == 'Databases'
+    assert row[5] is not None
+
     history = db_client.get_quiz_history(42, limit=5)
     assert len(history) == 1
     assert history[0][1] == 5
@@ -50,7 +63,7 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
     assert overview['events'] == 1
     assert overview['quiz_attempts'] == 1
     assert overview['quiz_scores'] == 1
-    assert overview['topic_scores'] == 1
+    assert 'topic_scores' not in overview
 
 
 def test_db_host_full_url_is_accepted(monkeypatch):

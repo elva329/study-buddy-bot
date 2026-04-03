@@ -844,7 +844,18 @@ async def finish_quiz(update, context, user_id):
     score = state.get('score', 0)
     total = state.get('amount', 0)
     percent = int(100 * score / total) if total > 0 else 0
-    log_quiz_score(user_id, score, total, percent)
+    log_event(user_id, 'quiz_score_persist_started', {
+        'score': score,
+        'total': total,
+        'percent': percent,
+    })
+    quiz_score_saved = log_quiz_score(user_id, score, total, percent)
+    log_event(user_id, 'quiz_score_persist_finished', {
+        'score': score,
+        'total': total,
+        'percent': percent,
+        'saved': quiz_score_saved,
+    })
     log_event(user_id, 'quiz_completed', {
         'score': score,
         'total': total,

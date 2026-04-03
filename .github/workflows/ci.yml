@@ -69,7 +69,6 @@ jobs:
           assert overview['events'] >= 1
           assert overview['quiz_attempts'] >= 1
           assert overview['quiz_scores'] >= 1
-          assert overview['topic_scores'] >= 1
 
           print('Database smoke check passed.')
           PY
