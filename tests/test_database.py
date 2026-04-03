@@ -31,16 +31,44 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
 
     conn = db_client.get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT score, total, percent, passed, weak_topic, topic_breakdown FROM quiz_scores WHERE user_id = ?' if db_client.DB_URL.startswith(
-        'sqlite') else 'SELECT score, total, percent, passed, weak_topic, topic_breakdown FROM quiz_scores WHERE user_id = %s', (42,))
+    cur.execute('SELECT id, username, email FROM users WHERE id = ?' if db_client.DB_URL.startswith(
+        'sqlite') else 'SELECT id, username, email FROM users WHERE id = %s', (42,))
+    user_row = cur.fetchone()
+
+    cur.execute(
+        'SELECT id, title, category, total_questions FROM quizzes ORDER BY id DESC LIMIT 1')
+    quiz_row = cur.fetchone()
+
+    cur.execute('SELECT score, num_questions, percent, passed, weak_topic, topic_breakdown, status FROM quiz_attempts WHERE user_id = ?' if db_client.DB_URL.startswith(
+        'sqlite') else 'SELECT score, num_questions, percent, passed, weak_topic, topic_breakdown, status FROM quiz_attempts WHERE user_id = %s', (42,))
     row = cur.fetchone()
+
+    cur.execute('PRAGMA table_info(messages)')
+    message_columns = [column[1] for column in cur.fetchall()]
+
+    cur.execute('PRAGMA foreign_key_list(quiz_attempts)')
+    quiz_attempts_fks = cur.fetchall()
+
+    cur.execute('PRAGMA index_list(quiz_attempts)')
+    quiz_attempts_indexes = [index[1] for index in cur.fetchall()]
+
+    cur.execute('PRAGMA index_list(messages)')
+    message_indexes = [index[1] for index in cur.fetchall()]
     cur.close()
     conn.close()
 
+    assert user_row is not None
+    assert quiz_row is not None
     assert row is not None
     assert row[3] == 1
     assert row[4] == 'Databases'
     assert row[5] is not None
+    assert row[6] in ('passed', 'failed')
+    assert 'message' not in message_columns
+    assert any(fk[2] == 'users' for fk in quiz_attempts_fks)
+    assert any(fk[2] == 'quizzes' for fk in quiz_attempts_fks)
+    assert 'idx_quiz_attempts_user_timestamp' in quiz_attempts_indexes
+    assert 'idx_messages_user_timestamp' in message_indexes
 
     history = db_client.get_quiz_history(42, limit=5)
     assert len(history) == 1
@@ -59,11 +87,11 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
     assert progress[0]['num_questions'] == 5
 
     overview = db_client.get_db_overview()
+    assert overview['users'] == 1
+    assert overview['quizzes'] == 1
     assert overview['messages'] == 1
     assert overview['events'] == 1
     assert overview['quiz_attempts'] == 1
-    assert overview['quiz_scores'] == 1
-    assert 'topic_scores' not in overview
 
 
 def test_db_host_full_url_is_accepted(monkeypatch):
