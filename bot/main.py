@@ -369,7 +369,7 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
             return all(not cell for cell in normalized)
 
         # Helper function to wrap text for table cells
-        def wrap_text(text, max_width=12):
+        def wrap_text(text, max_width=10):
             """Wrap text to fit in table cells with proper line breaks"""
             if not text:
                 return ''
@@ -525,19 +525,21 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
                 else:
                     cell.set_facecolor('#F1F8E9')  # Very light green
 
-                # Keep the time column centered vertically; only plan content
-                # cells are top-aligned for easier scanning.
+                # Top-align every cell so wrapped content starts at the top.
                 if j == 0:
                     cell.set_text_props(
-                        weight='bold', fontsize=18, ha='center', va='center')
+                        weight='bold', fontsize=18, ha='center', va='top')
                 else:
                     cell.set_text_props(
                         fontsize=18, ha='left', va='top', wrap=True)
 
+                cell.get_text().set_va('top')
+                cell.get_text().set_ha('center' if j == 0 else 'left')
+
                 # Increase cell height to show wrapped lines based on row content
                 cell.set_height(
-                    usable_height * row_units[i] / total_units * 1.15)
-                cell.PAD = 0.06
+                    usable_height * row_units[i] / total_units * 1.35)
+                cell.PAD = 0.10
 
         # Save to BytesIO
         buffer = BytesIO()
