@@ -525,10 +525,11 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
                 else:
                     cell.set_facecolor('#F1F8E9')  # Very light green
 
-                # Time column styling
+                # Keep the time column centered vertically; only plan content
+                # cells are top-aligned for easier scanning.
                 if j == 0:
                     cell.set_text_props(
-                        weight='bold', fontsize=18, ha='center', va='top')
+                        weight='bold', fontsize=18, ha='center', va='center')
                 else:
                     cell.set_text_props(
                         fontsize=18, ha='left', va='top', wrap=True)
