@@ -1,6 +1,6 @@
 # Study Buddy Bot
 
-Cloud-deployed Telegram chatbot powered by an LLM for study support (PDF Q&A, quiz, summaries, and study planning), with Docker + CI/CD + monitoring.
+Cloud-deployed Telegram chatbot powered by HKBU OpenAI LLM for study support (PDF Q&A, quiz, summaries, and study planning), with Docker + CI/CD + monitoring.
 
 ## Implemented Features
 - Telegram bot commands:
