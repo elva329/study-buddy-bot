@@ -22,6 +22,7 @@ Cloud-deployed Telegram chatbot powered by an LLM for study support (PDF Q&A, qu
 
 ## Project Structure
 - `bot/`: production Telegram bot runtime (`python -m bot.main`)
+- `src/`: alternate implementation tree kept for reference
 - `database/`: DB client and persistence helpers
 - `llm/`: LLM client modules
 - `monitoring/`: monitoring notes and alert guidance

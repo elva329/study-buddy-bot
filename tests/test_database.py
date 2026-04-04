@@ -31,12 +31,12 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
 
     conn = db_client.get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT id, username, email FROM users WHERE id = ?' if db_client.DB_URL.startswith(
-        'sqlite') else 'SELECT id, username, email FROM users WHERE id = %s', (42,))
+    cur.execute('SELECT id, username, created_at FROM users WHERE id = ?' if db_client.DB_URL.startswith(
+        'sqlite') else 'SELECT id, username, created_at FROM users WHERE id = %s', (42,))
     user_row = cur.fetchone()
 
     cur.execute(
-        'SELECT id, title, category, total_questions FROM quizzes ORDER BY id DESC LIMIT 1')
+        'SELECT id, total_questions FROM quizzes ORDER BY id DESC LIMIT 1')
     quiz_row = cur.fetchone()
 
     cur.execute('SELECT score, num_questions, percent, passed, weak_topic, topic_breakdown, status FROM quiz_attempts WHERE user_id = ?' if db_client.DB_URL.startswith(
@@ -45,6 +45,9 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
 
     cur.execute('PRAGMA table_info(messages)')
     message_columns = [column[1] for column in cur.fetchall()]
+
+    cur.execute('PRAGMA foreign_key_list(messages)')
+    message_fks = cur.fetchall()
 
     cur.execute('PRAGMA foreign_key_list(quiz_attempts)')
     quiz_attempts_fks = cur.fetchall()
@@ -58,17 +61,22 @@ def test_database_persistence_smoke(tmp_path, monkeypatch):
     conn.close()
 
     assert user_row is not None
+    assert user_row[2] is not None
     assert quiz_row is not None
+    assert quiz_row[1] == 5
     assert row is not None
     assert row[3] == 1
     assert row[4] == 'Databases'
     assert row[5] is not None
     assert row[6] in ('passed', 'failed')
-    assert 'message' not in message_columns
+    assert 'message_type' in message_columns
+    assert 'quiz_attempt_id' in message_columns
+    assert any(fk[2] == 'quiz_attempts' for fk in message_fks)
     assert any(fk[2] == 'users' for fk in quiz_attempts_fks)
     assert any(fk[2] == 'quizzes' for fk in quiz_attempts_fks)
     assert 'idx_quiz_attempts_user_timestamp' in quiz_attempts_indexes
     assert 'idx_messages_user_timestamp' in message_indexes
+    assert 'idx_messages_quiz_attempt_id' in message_indexes
 
     history = db_client.get_quiz_history(42, limit=5)
     assert len(history) == 1

@@ -7,7 +7,7 @@ import os
 from urllib.parse import quote_plus
 
 
-def log_quiz_attempt_db(user_id, num_questions, timestamp=None):
+def log_quiz_attempt_db(user_id, num_questions):
     try:
         conn = get_conn()
         ensure_user_exists(conn, user_id)
@@ -15,11 +15,10 @@ def log_quiz_attempt_db(user_id, num_questions, timestamp=None):
 
         ensure_core_schema(conn)
 
-        quiz_id = create_quiz_record(
-            conn, 'Generated Quiz', 'Study Materials', num_questions)
+        quiz_id = create_quiz_record(conn, num_questions)
 
         # Insert a started quiz attempt; score will be filled in on completion.
-        insert_quiz_attempt(
+        attempt_id = insert_quiz_attempt(
             conn,
             user_id=user_id,
             quiz_id=quiz_id,
@@ -35,8 +34,10 @@ def log_quiz_attempt_db(user_id, num_questions, timestamp=None):
         conn.commit()
         cur.close()
         conn.close()
+        return attempt_id
     except Exception as e:
         print(f"[DB Error - quiz_attempts] {e}")
+        return None
 
 # Fetch quiz session metadata for a user (for progress tracking)
 
@@ -201,16 +202,13 @@ def ensure_core_schema(conn):
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
-                username TEXT,
-                email TEXT,
-                first_seen_at TEXT
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
         ''')
         cur.execute('''
             CREATE TABLE IF NOT EXISTS quizzes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                category TEXT NOT NULL,
                 total_questions INTEGER NOT NULL CHECK (total_questions > 0),
                 created_at TEXT NOT NULL
             )
@@ -238,8 +236,11 @@ def ensure_core_schema(conn):
                 user_id INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 sender_type TEXT NOT NULL,
+                message_type TEXT NOT NULL DEFAULT 'chat',
+                quiz_attempt_id INTEGER,
                 timestamp TEXT NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (quiz_attempt_id) REFERENCES quiz_attempts(id) ON DELETE SET NULL
             )
         ''')
         cur.execute('''
@@ -255,10 +256,7 @@ def ensure_core_schema(conn):
         conn.commit()
         cur.close()
         ensure_column_exists(conn, 'users', 'username', 'TEXT')
-        ensure_column_exists(conn, 'users', 'email', 'TEXT')
-        ensure_column_exists(conn, 'users', 'first_seen_at', 'TEXT')
-        ensure_column_exists(conn, 'quizzes', 'title', 'TEXT')
-        ensure_column_exists(conn, 'quizzes', 'category', 'TEXT')
+        ensure_column_exists(conn, 'users', 'created_at', 'TEXT')
         ensure_column_exists(conn, 'quizzes', 'total_questions', 'INTEGER')
         ensure_column_exists(conn, 'quizzes', 'created_at', 'TEXT')
         ensure_column_exists(conn, 'quiz_attempts', 'quiz_id', 'INTEGER')
@@ -271,6 +269,8 @@ def ensure_core_schema(conn):
         ensure_column_exists(conn, 'quiz_attempts', 'status', 'TEXT')
         ensure_column_exists(conn, 'messages', 'content', 'TEXT')
         ensure_column_exists(conn, 'messages', 'sender_type', 'TEXT')
+        ensure_column_exists(conn, 'messages', 'message_type', 'TEXT')
+        ensure_column_exists(conn, 'messages', 'quiz_attempt_id', 'INTEGER')
         ensure_column_exists(conn, 'messages', 'timestamp', 'TEXT')
         ensure_column_exists(conn, 'events', 'event_type', 'TEXT')
         ensure_column_exists(conn, 'events', 'payload', 'TEXT')
@@ -281,16 +281,13 @@ def ensure_core_schema(conn):
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id BIGINT PRIMARY KEY,
-            username TEXT,
-            email TEXT,
-            first_seen_at TIMESTAMP
+            username TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL
         )
     ''')
     cur.execute('''
         CREATE TABLE IF NOT EXISTS quizzes (
             id SERIAL PRIMARY KEY,
-            title TEXT NOT NULL,
-            category TEXT NOT NULL,
             total_questions INTEGER NOT NULL CHECK (total_questions > 0),
             created_at TIMESTAMP NOT NULL
         )
@@ -316,6 +313,8 @@ def ensure_core_schema(conn):
             user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             content TEXT NOT NULL,
             sender_type VARCHAR(10) NOT NULL,
+            message_type VARCHAR(32) NOT NULL DEFAULT 'chat',
+            quiz_attempt_id INTEGER,
             timestamp TIMESTAMP NOT NULL
         )
     ''')
@@ -331,10 +330,7 @@ def ensure_core_schema(conn):
     conn.commit()
     cur.close()
     ensure_column_exists(conn, 'users', 'username', 'TEXT')
-    ensure_column_exists(conn, 'users', 'email', 'TEXT')
-    ensure_column_exists(conn, 'users', 'first_seen_at', 'TIMESTAMP')
-    ensure_column_exists(conn, 'quizzes', 'title', 'TEXT')
-    ensure_column_exists(conn, 'quizzes', 'category', 'TEXT')
+    ensure_column_exists(conn, 'users', 'created_at', 'TIMESTAMP')
     ensure_column_exists(conn, 'quizzes', 'total_questions', 'INTEGER')
     ensure_column_exists(conn, 'quizzes', 'created_at', 'TIMESTAMP')
     ensure_column_exists(conn, 'quiz_attempts', 'quiz_id', 'INTEGER')
@@ -345,7 +341,76 @@ def ensure_core_schema(conn):
     ensure_column_exists(conn, 'quiz_attempts', 'weak_topic', 'TEXT')
     ensure_column_exists(conn, 'quiz_attempts', 'topic_breakdown', 'TEXT')
     ensure_column_exists(conn, 'quiz_attempts', 'status', 'VARCHAR(32)')
+    ensure_column_exists(conn, 'messages', 'message_type', 'VARCHAR(32)')
+    ensure_column_exists(conn, 'messages', 'quiz_attempt_id', 'INTEGER')
+    migrate_postgres_schema(conn)
     ensure_indexes(conn)
+
+
+def _postgres_column_exists(conn, table_name, column_name):
+    cur = conn.cursor()
+    cur.execute(
+        '''
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+        ''',
+        (table_name, column_name)
+    )
+    exists = cur.fetchone() is not None
+    cur.close()
+    return exists
+
+
+def migrate_postgres_schema(conn):
+    if DB_URL.startswith('sqlite'):
+        return
+
+    cur = conn.cursor()
+
+    if _postgres_column_exists(conn, 'users', 'email'):
+        cur.execute('ALTER TABLE users DROP COLUMN IF EXISTS email')
+    if _postgres_column_exists(conn, 'users', 'first_seen_at') and not _postgres_column_exists(conn, 'users', 'created_at'):
+        cur.execute(
+            'ALTER TABLE users RENAME COLUMN first_seen_at TO created_at')
+    cur.execute(
+        'ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP')
+
+    if _postgres_column_exists(conn, 'quizzes', 'title'):
+        cur.execute('ALTER TABLE quizzes DROP COLUMN IF EXISTS title')
+    if _postgres_column_exists(conn, 'quizzes', 'category'):
+        cur.execute('ALTER TABLE quizzes DROP COLUMN IF EXISTS category')
+
+    cur.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_type VARCHAR(32) NOT NULL DEFAULT 'chat'"
+    )
+    cur.execute(
+        'ALTER TABLE messages ADD COLUMN IF NOT EXISTS quiz_attempt_id INTEGER'
+    )
+    cur.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'fk_messages_quiz_attempt_id'
+            ) THEN
+                ALTER TABLE messages
+                ADD CONSTRAINT fk_messages_quiz_attempt_id
+                FOREIGN KEY (quiz_attempt_id) REFERENCES quiz_attempts(id) ON DELETE SET NULL;
+            END IF;
+        END $$;
+    ''')
+
+    cur.execute('''
+        CREATE INDEX IF NOT EXISTS idx_messages_user_timestamp
+        ON messages (user_id, timestamp DESC)
+    ''')
+    cur.execute('''
+        CREATE INDEX IF NOT EXISTS idx_messages_quiz_attempt_id
+        ON messages (quiz_attempt_id)
+    ''')
+
+    conn.commit()
+    cur.close()
 
 
 def ensure_indexes(conn):
@@ -355,6 +420,7 @@ def ensure_indexes(conn):
         'CREATE INDEX IF NOT EXISTS idx_quiz_attempts_quiz_id ON quiz_attempts (quiz_id)',
         'CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user_status_timestamp ON quiz_attempts (user_id, status, timestamp DESC)',
         'CREATE INDEX IF NOT EXISTS idx_messages_user_timestamp ON messages (user_id, timestamp DESC)',
+        'CREATE INDEX IF NOT EXISTS idx_messages_quiz_attempt_id ON messages (quiz_attempt_id)',
         'CREATE INDEX IF NOT EXISTS idx_events_user_timestamp ON events (user_id, timestamp DESC)',
     ]
     for statement in index_statements:
@@ -363,40 +429,40 @@ def ensure_indexes(conn):
     cur.close()
 
 
-def ensure_user_exists(conn, user_id, username=None, email=None):
+def ensure_user_exists(conn, user_id, username=None):
     ensure_core_schema(conn)
     cur = conn.cursor()
     username = username or f'telegram_{user_id}'
 
     if DB_URL.startswith('sqlite'):
         cur.execute(
-            'INSERT OR IGNORE INTO users (id, username, email, first_seen_at) VALUES (?, ?, ?, ?)',
-            (user_id, username, email, get_current_timestamp())
+            'INSERT OR IGNORE INTO users (id, username, created_at) VALUES (?, ?, ?)',
+            (user_id, username, get_current_timestamp())
         )
     else:
         cur.execute(
-            'INSERT INTO users (id, username, email, first_seen_at) VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING',
-            (user_id, username, email, get_current_timestamp())
+            'INSERT INTO users (id, username, created_at) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING',
+            (user_id, username, get_current_timestamp())
         )
 
     conn.commit()
     cur.close()
 
 
-def create_quiz_record(conn, title, category, total_questions):
+def create_quiz_record(conn, total_questions):
     ensure_core_schema(conn)
     cur = conn.cursor()
 
     if DB_URL.startswith('sqlite'):
         cur.execute(
-            'INSERT INTO quizzes (title, category, total_questions, created_at) VALUES (?, ?, ?, ?)',
-            (title, category, total_questions, get_current_timestamp())
+            'INSERT INTO quizzes (total_questions, created_at) VALUES (?, ?)',
+            (total_questions, get_current_timestamp())
         )
         quiz_id = cur.lastrowid
     else:
         cur.execute(
-            'INSERT INTO quizzes (title, category, total_questions, created_at) VALUES (%s, %s, %s, %s) RETURNING id',
-            (title, category, total_questions, get_current_timestamp())
+            'INSERT INTO quizzes (total_questions, created_at) VALUES (%s, %s) RETURNING id',
+            (total_questions, get_current_timestamp())
         )
         quiz_id = cur.fetchone()[0]
 
@@ -553,15 +619,25 @@ def get_quiz_history(user_id, limit=5):
         return []
 
 
-def log_message(user_id, message, sender):
+def log_message(user_id, message, sender, message_type='chat', quiz_attempt_id=None):
     """Log a message to the database"""
     try:
         conn = get_conn()
         ensure_user_exists(conn, user_id)
         cur = conn.cursor()
         ensure_core_schema(conn)
-        cur.execute(INSERT, (user_id, message,
-                    sender, get_current_timestamp()))
+        if DB_URL.startswith('sqlite'):
+            cur.execute(
+                'INSERT INTO messages (user_id, content, sender_type, message_type, quiz_attempt_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+                (user_id, message, sender, message_type,
+                 quiz_attempt_id, get_current_timestamp())
+            )
+        else:
+            cur.execute(
+                'INSERT INTO messages (user_id, content, sender_type, message_type, quiz_attempt_id, timestamp) VALUES (%s, %s, %s, %s, %s, %s)',
+                (user_id, message, sender, message_type,
+                 quiz_attempt_id, get_current_timestamp())
+            )
         conn.commit()
         cur.close()
         conn.close()
@@ -616,8 +692,7 @@ def log_quiz_score(user_id, score, total, percent, topic_scores=None):
         saved = update_latest_quiz_attempt(
             conn, user_id, score, total, percent, passed, weak_topic, topic_breakdown)
         if not saved:
-            quiz_id = create_quiz_record(
-                conn, 'Generated Quiz', 'Study Materials', total)
+            quiz_id = create_quiz_record(conn, total)
             insert_quiz_attempt(
                 conn, user_id, quiz_id, total, score, percent, passed,
                 weak_topic, topic_breakdown, status='passed' if passed else 'failed'

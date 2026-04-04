@@ -52,11 +52,15 @@ jobs:
           conn = db_client.get_conn()
           cur = conn.cursor()
 
-          cur.execute('SELECT id, username, email FROM users WHERE id = ?', (42,))
-          assert cur.fetchone() is not None
+          cur.execute('SELECT id, username, created_at FROM users WHERE id = ?', (42,))
+          user_row = cur.fetchone()
+          assert user_row is not None
+          assert user_row[2] is not None
 
-          cur.execute('SELECT id, title, category, total_questions FROM quizzes ORDER BY id DESC LIMIT 1')
-          assert cur.fetchone() is not None
+          cur.execute('SELECT id, total_questions FROM quizzes ORDER BY id DESC LIMIT 1')
+          quiz_row = cur.fetchone()
+          assert quiz_row is not None
+          assert quiz_row[1] == 5
 
           cur.execute('SELECT score, num_questions, percent, passed, weak_topic, topic_breakdown, status FROM quiz_attempts WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1', (42,))
           attempt_row = cur.fetchone()
@@ -68,7 +72,12 @@ jobs:
 
           cur.execute('PRAGMA table_info(messages)')
           message_columns = [column[1] for column in cur.fetchall()]
-          assert 'message' not in message_columns
+          assert 'message_type' in message_columns
+          assert 'quiz_attempt_id' in message_columns
+
+          cur.execute('PRAGMA foreign_key_list(messages)')
+          message_fks = cur.fetchall()
+          assert any(fk[2] == 'quiz_attempts' for fk in message_fks)
 
           cur.execute('PRAGMA foreign_key_list(quiz_attempts)')
           quiz_attempts_fks = cur.fetchall()
@@ -82,6 +91,7 @@ jobs:
           cur.execute('PRAGMA index_list(messages)')
           message_indexes = [index[1] for index in cur.fetchall()]
           assert 'idx_messages_user_timestamp' in message_indexes
+          assert 'idx_messages_quiz_attempt_id' in message_indexes
 
           cur.close()
           conn.close()

@@ -1,6 +1,6 @@
 # Inline and reply keyboard definitions for the bot
 
-from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import KeyboardButton, ReplyKeyboardMarkup
 
 # Example: Quiz answer keyboard
 

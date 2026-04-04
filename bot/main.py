@@ -61,6 +61,8 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Remove markdown formatting
             summary = strip_markdown(summary)
             await update.message.reply_text(f"{fname}:\n{summary}")
+            log_message(user_id, f"{fname}:\n{summary}",
+                        sender='bot', message_type='summary')
             log_event(user_id, 'summarize_completed', {
                 'filename': fname,
                 'summary_excerpt': db_excerpt(summary, 800),
@@ -76,7 +78,7 @@ async def summarize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Store quiz session metadata in DB (replaces JSON)
 def log_quiz_attempt(user_id, num_questions):
-    log_quiz_attempt_db(user_id, num_questions)
+    return log_quiz_attempt_db(user_id, num_questions)
 
 
 def db_excerpt(text, limit=500):
@@ -639,7 +641,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_event(user_id, 'rate_limit_rejected', {'path': 'handle_message'})
         return
 
-    log_message(user_id, user_message, sender='user')
+    log_message(user_id, user_message, sender='user',
+                message_type='chat_question')
     log_event(user_id, 'message_received', {
               'message_excerpt': db_excerpt(user_message, 300)})
     global gpt
@@ -655,7 +658,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = gpt.submit(prompt)
     # Remove markdown formatting
     response = strip_markdown(response)
-    log_message(user_id, response, sender='bot')
+    log_message(user_id, response, sender='bot', message_type='chat_answer')
     log_event(user_id, 'message_replied', {
         'response_excerpt': db_excerpt(response, 500),
         'used_pdf_context': bool(context_text.strip()),
@@ -823,6 +826,8 @@ async def generate_and_send_next_question(update, context, user_id):
     keyboard = [[KeyboardButton(f"{chr(65+i)}")] for i in range(4)]
 
     await thinking_msg.delete()
+    log_message(user_id, msg, sender='bot', message_type='quiz_question',
+                quiz_attempt_id=state.get('quiz_attempt_id'))
     await update.message.reply_text(
         msg,
         reply_markup=ReplyKeyboardMarkup(
@@ -887,6 +892,8 @@ async def finish_quiz(update, context, user_id):
         f"{review}",
         reply_markup=ReplyKeyboardRemove()
     )
+    log_message(user_id, f"Quiz Complete!\n\nYour Score: {score}/{total} ({percent}%)\n\n{review}",
+                sender='bot', message_type='quiz_summary', quiz_attempt_id=state.get('quiz_attempt_id'))
 
     # Clear new upload mode after quiz completion if it was used
     # (No longer needed - user can type /endsession to clear)
@@ -915,7 +922,7 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 prefs["amount"] = num_questions
                 prefs["step"] = "in_progress"
-                log_quiz_attempt(user_id, num_questions)
+                quiz_attempt_id = log_quiz_attempt(user_id, num_questions)
                 log_event(user_id, 'quiz_started', {
                           'num_questions': num_questions})
 
@@ -937,7 +944,8 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "score": 0,
                     "answers": [],
                     "context_text": context_text,
-                    "last_question": None
+                    "last_question": None,
+                    "quiz_attempt_id": quiz_attempt_id,
                 }
 
                 await generate_and_send_next_question(update, context, user_id)
@@ -957,6 +965,8 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             question = state['last_question']
             user_answer = update.message.text.strip().upper()
+            log_message(user_id, user_answer, sender='user', message_type='quiz_answer',
+                        quiz_attempt_id=state.get('quiz_attempt_id'))
 
             # Validate answer
             if user_answer not in ['A', 'B', 'C', 'D']:
@@ -996,6 +1006,8 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Send feedback
             await update.message.reply_text(feedback)
+            log_message(user_id, feedback, sender='bot', message_type='quiz_feedback',
+                        quiz_attempt_id=state.get('quiz_attempt_id'))
 
             # Send next question or finish
             if state['current'] < state['amount']:
@@ -1020,6 +1032,8 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "How many questions would you like to answer?\n\n"
             "Please enter a number between 1 and 20:"
         )
+        log_message(user_id, "How many questions would you like to answer? Please enter a number between 1 and 20:",
+                    sender='bot', message_type='quiz_setup')
 
 
 # --- Session Management Command ---
@@ -1099,6 +1113,8 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Please provide your question. You can continue asking follow-up questions in this mode."
     )
+    log_message(user_id, "Please provide your question. You can continue asking follow-up questions in this mode.",
+                sender='bot', message_type='ask_setup')
 
 
 async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1161,12 +1177,16 @@ async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=image_buffer,
                 caption=""
             )
+            log_message(user_id, plan_content,
+                        sender='bot', message_type='plan')
             log_event(user_id, 'plan_completed', {'format': 'image'})
         else:
             # Fallback to text format
             formatted_plan = format_study_plan_table(plan_content)
             await status_msg.edit_text("✅ Study plan generated!")
             await update.message.reply_text(formatted_plan)
+            log_message(user_id, formatted_plan,
+                        sender='bot', message_type='plan')
             log_event(user_id, 'plan_completed', {
                 'format': 'text',
                 'plan_excerpt': db_excerpt(formatted_plan, 800),
@@ -1210,7 +1230,7 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
         log_event(user_id, 'rate_limit_rejected', {'path': 'ask'})
         return
 
-    log_message(user_id, question, sender='user')
+    log_message(user_id, question, sender='user', message_type='ask_question')
     log_event(user_id, 'ask_question_received', {
               'question_excerpt': db_excerpt(question, 300)})
 
@@ -1296,7 +1316,8 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                     response += f"{i}. {chunk['filename']} (Page {chunk['page_num']})\n"
 
                 await update.message.reply_text(response)
-                log_message(user_id, response, sender='bot')
+                log_message(user_id, response, sender='bot',
+                            message_type='ask_answer')
                 log_event(user_id, 'ask_answered_from_docs', {
                     'source_count': len(relevant_chunks),
                     'answer_excerpt': db_excerpt(answer, 500),
@@ -1319,7 +1340,8 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"{internet_result}"
             )
             await update.message.reply_text(response)
-            log_message(user_id, response, sender='bot')
+            log_message(user_id, response, sender='bot',
+                        message_type='ask_answer')
             log_event(user_id, 'ask_answered_from_internet', {
                 'answer_excerpt': db_excerpt(internet_result, 500),
                 'reason': 'acronym_no_doc_match',
@@ -1337,7 +1359,7 @@ async def process_ask_question(update: Update, context: ContextTypes.DEFAULT_TYP
             "Try asking with more exact keywords from the document title or the topic heading."
         )
         await update.message.reply_text(response)
-        log_message(user_id, response, sender='bot')
+        log_message(user_id, response, sender='bot', message_type='ask_answer')
         log_event(user_id, 'ask_no_confident_match', {
             'question_excerpt': db_excerpt(question, 300),
             'uploaded_file_count': len(chunks),
