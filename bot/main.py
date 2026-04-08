@@ -369,7 +369,7 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
             return all(not cell for cell in normalized)
 
         # Helper function to wrap text for table cells
-        def wrap_text(text, max_width=10):
+        def wrap_text(text, max_width=15):
             """Wrap text to fit in table cells with proper line breaks"""
             if not text:
                 return ''
@@ -494,14 +494,13 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
         table.auto_set_font_size(False)
         table.set_fontsize(18)
 
-        row_units = [1]
-        for row in table_data[1:]:
+        row_units = []
+        for row in table_data:
             max_lines = 1
             for cell_text in row:
                 if cell_text:
                     max_lines = max(max_lines, cell_text.count('\n') + 1)
             row_units.append(max_lines)
-
         total_units = sum(row_units)
         usable_height = 0.960
 
@@ -509,10 +508,12 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
         for i in range(len(table_data[0])):
             cell = table[(0, i)]
             cell.set_facecolor('#2E7D32')  # Darker green
+            # Top-align headers for study content, center the time column header
+            v_align = 'center' if i == 0 else 'top'
             cell.set_text_props(weight='bold', color='white',
-                                fontsize=18, ha='center', va='center')
-            cell.set_height(usable_height * row_units[0] / total_units * 1.15)
-            cell.PAD = 0.035
+                                fontsize=18, ha='center', va=v_align)
+            cell.set_height(usable_height * row_units[0] / total_units)
+            cell.PAD = 0.02
 
         # Format data rows with alternating colors
         for i in range(1, len(table_data)):
@@ -525,7 +526,7 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
                 else:
                     cell.set_facecolor('#F1F8E9')  # Very light green
 
-                # Top-align every cell so wrapped content starts at the top.
+                # Vertical alignment: center for time column, top for study topics
                 if j == 0:
                     cell.set_text_props(
                         weight='bold', fontsize=18, ha='center', va='center')
@@ -533,13 +534,10 @@ def generate_study_plan_image(plan_text: str) -> BytesIO:
                     cell.set_text_props(
                         fontsize=18, ha='left', va='top', wrap=True)
 
-                cell.get_text().set_va('center' if j == 0 else 'top')
-                cell.get_text().set_ha('center' if j == 0 else 'left')
-
                 # Increase cell height to show wrapped lines based on row content
-                cell.set_height(
-                    usable_height * row_units[i] / total_units * 1.50)
-                cell.PAD = 0.08
+                cell.set_height(usable_height * row_units[i] / total_units)
+                # Minimal padding to ensure text is fully visible within the cell
+                cell.PAD = 0.01
 
         # Save to BytesIO
         buffer = BytesIO()
