@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: study-buddy-bot
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_API_VER
+        sync: false
+      - key: REQUIRE_CLOUD_DB
+        value: "false"

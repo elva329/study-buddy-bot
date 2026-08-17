@@ -134,3 +134,33 @@ def test_require_cloud_db_rejects_sqlite(tmp_path, monkeypatch):
     else:
         raise AssertionError(
             'Expected RuntimeError when REQUIRE_CLOUD_DB=true with sqlite')
+
+
+def test_postgres_unavailable_falls_back_to_sqlite(tmp_path, monkeypatch):
+    import psycopg2
+
+    fallback_path = tmp_path / 'fallback.db'
+    db_client = reload_db_client(monkeypatch, {
+        'DATABASE_URL': 'postgresql://user:pass@127.0.0.1:6543/nodb',
+        'DB_FALLBACK_PATH': str(fallback_path),
+    })
+
+    def raise_connection_error(*args, **kwargs):
+        raise psycopg2.OperationalError('connection refused')
+
+    monkeypatch.setattr(psycopg2, 'connect', raise_connection_error)
+
+    # These calls must not raise; they should transparently use SQLite.
+    db_client.log_message(7, 'hello fallback', 'user')
+    db_client.log_event(7, 'fallback_event', {'ok': True})
+    saved = db_client.log_quiz_score(7, 3, 4, 75, {'Topic': (3, 4)})
+
+    assert saved is True
+    assert db_client.using_sqlite() is True
+    assert fallback_path.exists()
+
+    total_quizzes, avg_score, best_score, worst_score, weak_topic = db_client.get_quiz_stats(
+        7)
+    assert total_quizzes == 1
+    assert weak_topic == 'Topic'
+    assert db_client.get_db_overview()['users'] == 1
