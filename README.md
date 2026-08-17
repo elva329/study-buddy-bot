@@ -211,18 +211,18 @@ pytest -q
 
 | `/start` | `/ask` |
 | --- | --- |
-| ![start command](screenshots/start-command.jpg) | ![ask command](screenshots/ask-command.jpg) |
+| <img src="screenshots/start-command.jpg" alt="start command" width="240"> | <img src="screenshots/ask-command.jpg" alt="ask command" width="240"> |
 
 | `/quiz` | `/progress` |
 | --- | --- |
-| ![quiz command](screenshots/quiz-command.jpg) | ![progress command](screenshots/progress-command.jpg) |
+| <img src="screenshots/quiz-command.jpg" alt="quiz command" width="240"> | <img src="screenshots/progress-command.jpg" alt="progress command" width="240"> |
 
 | `/summarize` | `/plan` |
 | --- | --- |
-| ![summarize command](screenshots/summarize-command1.jpg) | ![plan command](screenshots/plan-command.jpg) |
+| <img src="screenshots/summarize-command1.jpg" alt="summarize command" width="240"> | <img src="screenshots/plan-command.jpg" alt="plan command" width="240"> |
 
-![generated study plan](screenshots/study-plan.jpg)
+<img src="screenshots/study-plan.jpg" alt="generated study plan" width="480">
 
 | `/endsession` |
 | --- |
-| ![endsession command](screenshots/endsession-command.jpg) |
+| <img src="screenshots/endsession-command.jpg" alt="endsession command" width="240"> |
