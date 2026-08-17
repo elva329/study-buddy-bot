@@ -133,6 +133,24 @@ Important:
 - Keep EC2 `.env` with cloud DB credentials.
 - Do not open DB port `5432` to `0.0.0.0/0`; allow the EC2 security group only.
 
+## Deploy to Render (Alternative Hosting)
+
+The bot can run on [Render](https://render.com) with **no AWS resources** — a `render.yaml` blueprint is included.
+
+1. Push this repository to GitHub.
+2. In Render, create a new **Blueprint** and connect the repo — Render reads `render.yaml` and provisions the service.
+3. In the service **Environment** tab, set the required secrets:
+   - `TELEGRAM_BOT_TOKEN`
+   - `LLM_API_KEY`
+   - `LLM_BASE_URL`
+   - `LLM_MODEL`
+   - `LLM_API_VER`
+4. Deploy. The bot binds to Render's injected `PORT` and serves `/health` for health checks.
+
+Notes:
+- The blueprint uses a **free web service**. Free web services sleep after ~15 minutes with no inbound HTTP traffic, so point a free uptime monitor (e.g. UptimeRobot) at `https://<your-service>.onrender.com/health` every 5 minutes to keep it awake.
+- No database is required: with no `DATABASE_URL`/`DB_*` variables set, the bot uses local SQLite (and still auto-falls back to SQLite if a cloud database is unreachable). On the free tier, files written inside the container (`uploads/`, the SQLite file) are ephemeral and reset on redeploy.
+
 ## Database & Data Management
 - **Infrastructure:** Amazon RDS (managed PostgreSQL) for industrial reliability.
 

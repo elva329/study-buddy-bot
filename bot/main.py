@@ -188,6 +188,14 @@ class MonitoringHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if self.path == '/':
+            self._send_json(200, {
+                'status': 'ok',
+                'service': 'study-buddy-bot',
+                'uptime_seconds': uptime_seconds,
+            })
+            return
+
         self._send_json(404, {'error': 'not found'})
 
     def log_message(self, format, *args):
@@ -195,7 +203,11 @@ class MonitoringHandler(BaseHTTPRequestHandler):
 
 
 def start_monitoring_server():
-    port = int(os.getenv('HEALTH_PORT', '8081'))
+    if os.getenv('RENDER', '').lower() in ('1', 'true', 'yes', 'on'):
+        # Render injects PORT and expects the service to bind to it.
+        port = int(os.getenv('PORT', '10000'))
+    else:
+        port = int(os.getenv('HEALTH_PORT', '8081'))
     try:
         server = HTTPServer(('0.0.0.0', port), MonitoringHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
