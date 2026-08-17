@@ -90,6 +90,11 @@ Database configuration (supported patterns):
    - `DB_NAME`
    - `DB_PORT` (optional, default `5432`)
 
+Database fallback (if the cloud PostgreSQL is unreachable, the bot transparently falls back to local SQLite):
+- `DB_FALLBACK_PATH` (default `studybuddy_fallback.db` in the project root)
+- `DB_POSTGRES_CONNECT_TIMEOUT` (default `5` seconds)
+- `DB_POSTGRES_RETRY_SECONDS` (default `60` seconds before retrying PostgreSQL)
+
 Runtime/monitoring controls:
 - `HEALTH_PORT` (default `8081`)
 - `MAX_DAILY_TOKENS` (default `120000`)
@@ -141,6 +146,7 @@ Important:
   - `messages` & `events` — complete audit trail for system monitoring.
   - `quiz_attempts` & `quizzes` — stores performance data for `/progress` analytics.
 - **Security:** data-at-rest encryption plus security groups restricted to the EC2 private IP (no public database access).
+- **Resilience:** if the cloud database is unreachable, the bot automatically falls back to a local SQLite store so it keeps working without downtime.
 
 ### Database Queries
 

@@ -1,4 +1,5 @@
 # Store quiz session metadata (for progress tracking, replaces user_progress.json)
+import time as _time
 import configparser
 import json
 from datetime import datetime, timezone
@@ -47,7 +48,7 @@ def get_user_progress_db(user_id):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            'SELECT timestamp, num_questions FROM quiz_attempts WHERE user_id = ? ORDER BY timestamp DESC' if DB_URL.startswith('sqlite')
+            'SELECT timestamp, num_questions FROM quiz_attempts WHERE user_id = ? ORDER BY timestamp DESC' if using_sqlite()
             else 'SELECT timestamp, num_questions FROM quiz_attempts WHERE user_id = %s ORDER BY timestamp DESC',
             (user_id,)
         )
@@ -110,38 +111,87 @@ if REQUIRE_CLOUD_DB and DB_URL.startswith('sqlite'):
     )
 
 # Backend selection for DB connection
-if DB_URL.startswith('sqlite'):
+
+ACTIVE_BACKEND = None  # 'sqlite' or 'postgres'
+POSTGRES_CONNECT_TIMEOUT = int(os.getenv('DB_POSTGRES_CONNECT_TIMEOUT', '5'))
+POSTGRES_RETRY_SECONDS = int(os.getenv('DB_POSTGRES_RETRY_SECONDS', '60'))
+FALLBACK_SQLITE_PATH = os.getenv(
+    'DB_FALLBACK_PATH', os.path.join(PROJECT_ROOT, 'studybuddy_fallback.db'))
+_postgres_down_until = 0.0
+
+
+def using_sqlite():
+    """True when the active connection backend is SQLite (native or fallback)."""
+    return ACTIVE_BACKEND == 'sqlite'
+
+
+def _open_sqlite_conn():
     import sqlite3
+    db_path = DB_URL.split('///')[-1] if DB_URL.startswith(
+        'sqlite') else FALLBACK_SQLITE_PATH
+    conn = sqlite3.connect(db_path)
+    conn.execute('PRAGMA foreign_keys = ON')
+    return conn
 
-    def get_conn():
-        db_path = DB_URL.split('///')[-1]
-        conn = sqlite3.connect(db_path)
-        conn.execute('PRAGMA foreign_keys = ON')
-        return conn
 
-    CREATE_TABLE = '''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            content TEXT,
-            sender_type TEXT,
-            timestamp TEXT
-        )
-    '''
-    INSERT = 'INSERT INTO messages (user_id, content, sender_type, timestamp) VALUES (?, ?, ?, ?)'
+def get_conn():
+    """Return a DB connection, falling back to local SQLite when PostgreSQL is unreachable."""
+    global ACTIVE_BACKEND, _postgres_down_until
 
-    # SQLite-specific query helpers
-    def get_quiz_history_query():
+    if DB_URL.startswith('sqlite'):
+        ACTIVE_BACKEND = 'sqlite'
+        return _open_sqlite_conn()
+
+    # Prefer the configured cloud PostgreSQL; fall back to SQLite when it is down.
+    if ACTIVE_BACKEND != 'sqlite' and _time.time() >= _postgres_down_until:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                DB_URL, connect_timeout=POSTGRES_CONNECT_TIMEOUT)
+            ACTIVE_BACKEND = 'postgres'
+            return conn
+        except Exception as exc:
+            print(
+                f'[DB Warning] PostgreSQL unavailable, falling back to SQLite: {exc}')
+            _postgres_down_until = _time.time() + POSTGRES_RETRY_SECONDS
+
+    ACTIVE_BACKEND = 'sqlite'
+    return _open_sqlite_conn()
+
+
+CREATE_TABLE = '''
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        content TEXT,
+        sender_type TEXT,
+        timestamp TEXT
+    )
+'''
+INSERT = 'INSERT INTO messages (user_id, content, sender_type, timestamp) VALUES (?, ?, ?, ?)'
+
+
+def get_quiz_history_query():
+    if using_sqlite():
         return 'SELECT timestamp, num_questions FROM quiz_attempts WHERE user_id = ? AND score IS NOT NULL ORDER BY timestamp DESC LIMIT ?'
+    return 'SELECT timestamp, num_questions FROM quiz_attempts WHERE user_id = %s AND score IS NOT NULL ORDER BY timestamp DESC LIMIT %s'
 
-    def get_quiz_stats_query():
+
+def get_quiz_stats_query():
+    if using_sqlite():
         return 'SELECT score, num_questions, percent, weak_topic, topic_breakdown FROM quiz_attempts WHERE user_id = ? AND score IS NOT NULL'
+    return 'SELECT score, num_questions, percent, weak_topic, topic_breakdown FROM quiz_attempts WHERE user_id = %s AND score IS NOT NULL'
 
-    def get_current_timestamp():
+
+def get_current_timestamp():
+    if using_sqlite():
         return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc)
 
-    def ensure_column_exists(conn, table_name, column_name, column_type):
-        cur = conn.cursor()
+
+def ensure_column_exists(conn, table_name, column_name, column_type):
+    cur = conn.cursor()
+    if using_sqlite():
         cur.execute(f'PRAGMA table_info({table_name})')
         existing_columns = {row[1] for row in cur.fetchall()}
         if column_name not in existing_columns:
@@ -149,36 +199,7 @@ if DB_URL.startswith('sqlite'):
                 f'ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}'
             )
             conn.commit()
-        cur.close()
-
-else:
-    def get_conn():
-        import psycopg2
-        return psycopg2.connect(DB_URL)
-
-    CREATE_TABLE = '''
-        CREATE TABLE IF NOT EXISTS messages (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            content TEXT,
-            sender_type VARCHAR(10),
-            timestamp TIMESTAMP
-        )
-    '''
-    INSERT = 'INSERT INTO messages (user_id, content, sender_type, timestamp) VALUES (%s, %s, %s, %s)'
-
-    # PostgreSQL-specific query helpers
-    def get_quiz_history_query():
-        return 'SELECT timestamp, num_questions FROM quiz_attempts WHERE user_id = %s AND score IS NOT NULL ORDER BY timestamp DESC LIMIT %s'
-
-    def get_quiz_stats_query():
-        return 'SELECT score, num_questions, percent, weak_topic, topic_breakdown FROM quiz_attempts WHERE user_id = %s AND score IS NOT NULL'
-
-    def get_current_timestamp():
-        return datetime.now(timezone.utc)
-
-    def ensure_column_exists(conn, table_name, column_name, column_type):
-        cur = conn.cursor()
+    else:
         cur.execute(
             '''
             SELECT 1
@@ -192,13 +213,13 @@ else:
                 f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}'
             )
             conn.commit()
-        cur.close()
+    cur.close()
 
 
 def ensure_core_schema(conn):
     cur = conn.cursor()
 
-    if DB_URL.startswith('sqlite'):
+    if using_sqlite():
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
@@ -363,7 +384,7 @@ def _postgres_column_exists(conn, table_name, column_name):
 
 
 def migrate_postgres_schema(conn):
-    if DB_URL.startswith('sqlite'):
+    if using_sqlite():
         return
 
     cur = conn.cursor()
@@ -434,7 +455,7 @@ def ensure_user_exists(conn, user_id, username=None):
     cur = conn.cursor()
     username = username or f'telegram_{user_id}'
 
-    if DB_URL.startswith('sqlite'):
+    if using_sqlite():
         cur.execute(
             'INSERT OR IGNORE INTO users (id, username, created_at) VALUES (?, ?, ?)',
             (user_id, username, get_current_timestamp())
@@ -453,7 +474,7 @@ def create_quiz_record(conn, total_questions):
     ensure_core_schema(conn)
     cur = conn.cursor()
 
-    if DB_URL.startswith('sqlite'):
+    if using_sqlite():
         cur.execute(
             'INSERT INTO quizzes (total_questions, created_at) VALUES (?, ?)',
             (total_questions, get_current_timestamp())
@@ -476,7 +497,7 @@ def insert_quiz_attempt(conn, user_id, quiz_id, num_questions, score=None, perce
     ensure_core_schema(conn)
     cur = conn.cursor()
 
-    if DB_URL.startswith('sqlite'):
+    if using_sqlite():
         cur.execute(
             'INSERT INTO quiz_attempts (user_id, quiz_id, num_questions, score, percent, passed, weak_topic, topic_breakdown, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (user_id, quiz_id, num_questions, score, percent, passed,
@@ -501,7 +522,7 @@ def update_latest_quiz_attempt(conn, user_id, score, total, percent, passed, wea
     cur = conn.cursor()
     status = 'passed' if passed else 'failed'
 
-    if DB_URL.startswith('sqlite'):
+    if using_sqlite():
         cur.execute(
             'SELECT id FROM quiz_attempts WHERE user_id = ? AND status = ? ORDER BY timestamp DESC LIMIT 1',
             (user_id, 'started')
@@ -626,7 +647,7 @@ def log_message(user_id, message, sender, message_type='chat', quiz_attempt_id=N
         ensure_user_exists(conn, user_id)
         cur = conn.cursor()
         ensure_core_schema(conn)
-        if DB_URL.startswith('sqlite'):
+        if using_sqlite():
             cur.execute(
                 'INSERT INTO messages (user_id, content, sender_type, message_type, quiz_attempt_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
                 (user_id, message, sender, message_type,
@@ -657,7 +678,7 @@ def log_event(user_id, event_type, payload=None):
 
         ensure_core_schema(conn)
 
-        if DB_URL.startswith('sqlite'):
+        if using_sqlite():
             cur.execute(
                 'INSERT INTO events (user_id, event_type, payload, timestamp) VALUES (?, ?, ?, ?)',
                 (user_id, event_type, payload_text,
