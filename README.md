@@ -8,61 +8,30 @@
 
 Students struggle to review large study materials (lecture slides, PDFs), and existing tools are passive — they don't drive interactive learning. **Study Buddy Bot** is a production-grade AI learning assistant that turns uploaded PDFs into an interactive study experience using **Retrieval-Augmented Generation (RAG)** and **cloud-native DevOps**.
 
-## Implemented Features
-- Telegram bot commands:
-  - `/start` — initialize the bot and start a new session
-  - `/ask` — ask questions about uploaded study materials (RAG-grounded)
-  - `/quiz` — generate multiple-choice quizzes from uploaded content
-  - `/progress` — view quiz performance and learning progress
-  - `/summarize` — summarize uploaded documents into key points
-  - `/plan` — generate a structured weekly study plan
-  - `/endsession` — clear session data and reset context
-- LLM integration via REST API (HKBU OpenAI-compatible)
-- PDF upload and retrieval-augmented Q&A
-- Database logging for messages, events, quizzes, and quiz attempts
-- Monitoring endpoints (`/health`, `/metrics`)
-- Cost/abuse guardrails:
-  - per-user request rate limiting
-  - daily LLM token budget tracking
-- Dockerized runtime + GitHub Actions CI/CD (test → build → deploy)
-
 ## Features
 
-### `/start` — Initialize
-Starts a fresh study session and lists the available commands.
+- **PDF Q&A** — RAG-grounded answers from uploaded study materials.
+- **Quiz generation** — multiple-choice quizzes generated from uploaded content.
+- **Progress tracking** — quiz performance history and weak topics.
+- **Summarization** — condensed key points from documents.
+- **Study planning** — structured weekly study timetable.
+- **LLM integration** — HKBU OpenAI-compatible REST API.
+- **Database logging** — messages, events, quizzes, and quiz attempts.
+- **Monitoring** — `/health` and `/metrics` endpoints.
+- **Cost/abuse guardrails** — per-user rate limiting and daily LLM token budgets.
+- **Containerized + CI/CD** — Docker runtime with a test → build → deploy pipeline.
 
-![start command](screenshots/start-command.jpg)
+### Commands
 
-### `/ask` — Context-Aware Q&A
-RAG-based: the bot retrieves relevant PDF chunks so answers are grounded in your uploaded materials.
-
-![ask command](screenshots/ask-command.jpg)
-
-### `/quiz` + `/progress` — Quiz Generation & Tracking
-Generates multiple-choice quizzes from your uploaded content, scores every attempt, and `/progress` shows your performance history and weak topics.
-
-| Quiz | Progress |
+| Command | Description |
 | --- | --- |
-| ![quiz question](screenshots/quiz-command1.jpg) | ![progress](screenshots/progress-command.jpg) |
-
-![quiz review](screenshots/quiz-command2.jpg)
-
-### `/summarize` — Summarization
-Condenses uploaded documents into concise study bullet points.
-
-| Summarize | Summarize (continued) |
-| --- | --- |
-| ![summarize 1](screenshots/summarize-command1.jpg) | ![summarize 2](screenshots/summarize-command2.jpg) |
-
-### `/plan` — Study Planning
-Generates a structured weekly study timetable based on the uploaded material.
-
-![plan command](screenshots/plan-command.jpg)
-
-### `/endsession` — End Session
-Clears uploaded documents and resets context for a new session.
-
-![endsession command](screenshots/endsession-command.jpg)
+| `/start` | Initialize the bot and start a new session |
+| `/ask` | Ask questions about uploaded study materials (RAG-grounded) |
+| `/quiz` | Generate multiple-choice quizzes from uploaded content |
+| `/progress` | View quiz performance and learning progress |
+| `/summarize` | Summarize uploaded documents into key points |
+| `/plan` | Generate a structured weekly study plan |
+| `/endsession` | Clear session data and reset context |
 
 ## Architecture
 
@@ -88,14 +57,20 @@ The bot uses a **stateless design combined with AWS RDS** so that data persists 
 - **Data layer:** PostgreSQL for event/message logging and quiz attempts, scores, and progress history
 - **Ops & reliability layer:** Docker + Docker Compose, GitHub Actions CI/CD (test, build, deploy to EC2), `/health` and `/metrics` endpoints, rate limiting and runtime logging
 
-## Project Structure
-- `bot/`: production Telegram bot runtime (`python -m bot.main`)
-- `src/`: alternate implementation tree kept for reference
-- `database/`: DB client and persistence helpers
-- `llm/`: LLM client modules
-- `monitoring/`: monitoring notes and alert guidance
-- `tests/`: pytest suite
-- `.github/workflows/`: CI/CD workflow
+## Quick Start (Local)
+1. Install dependencies:
+   ```sh
+   pip install -r requirements.txt
+   ```
+2. Configure `.env` with bot, LLM, and DB credentials.
+3. Run with Docker Compose (cloud DB):
+   ```sh
+   docker compose up -d --build bot
+   ```
+4. Optional local Postgres only for development:
+   ```sh
+   COMPOSE_PROFILES=localdb docker compose up -d --build
+   ```
 
 ## Environment Variables
 Required in `.env`:
@@ -122,20 +97,14 @@ Runtime/monitoring controls:
 - `MAX_REQUESTS_PER_WINDOW` (default `20`)
 - `REQUIRE_CLOUD_DB` (default `true` in Docker Compose)
 
-## Quick Start (Local)
-1. Install dependencies:
-   ```sh
-   pip install -r requirements.txt
-   ```
-2. Configure `.env` with bot, LLM, and DB credentials.
-3. Run with Docker Compose (cloud DB):
-   ```sh
-   docker compose up -d --build bot
-   ```
-4. Optional local Postgres only for development:
-   ```sh
-   COMPOSE_PROFILES=localdb docker compose up -d --build
-   ```
+## Project Structure
+- `bot/`: production Telegram bot runtime (`python -m bot.main`)
+- `src/`: alternate implementation tree kept for reference
+- `database/`: DB client and persistence helpers
+- `llm/`: LLM client modules
+- `monitoring/`: monitoring notes and alert guidance
+- `tests/`: pytest suite
+- `.github/workflows/`: CI/CD workflow
 
 ## Cloud Infrastructure (AWS)
 - **Instance:** `t2.micro` (free-tier eligible), running the bot 24/7.
@@ -146,6 +115,8 @@ Runtime/monitoring controls:
 ## Cloud Deployment & CI/CD (GitHub Actions)
 - Workflow file: `.github/workflows/ci.yml`
 - Fully automated pipeline triggered on push to `main`/`master` (and pull requests).
+
+![GitHub Actions pipeline](screenshots/github-actions.png)
 
 Pipeline stages:
 1. **QA** — install dependencies and run the `pytest` suite.
@@ -159,11 +130,23 @@ Important:
 
 ## Database & Data Management
 - **Infrastructure:** Amazon RDS (managed PostgreSQL) for industrial reliability.
+
+![RDS database](screenshots/database.png)
+
 - **Relational schema:**
+
+![Entity-Relationship Diagram](screenshots/ERD.png)
+
   - `users` — tracks preferences and handshakes.
   - `messages` & `events` — complete audit trail for system monitoring.
   - `quiz_attempts` & `quizzes` — stores performance data for `/progress` analytics.
 - **Security:** data-at-rest encryption plus security groups restricted to the EC2 private IP (no public database access).
+
+### Database Queries
+
+| `users` | `events` | `quizzes` |
+| --- | --- | --- |
+| ![users query](screenshots/query%20of%20users.png) | ![events query](screenshots/query%20of%20events.png) | ![quizzes query](screenshots/query%20of%20quizzes.png) |
 
 ## Monitoring & Cost Control
 Observability is exposed on port `8081`:
@@ -223,3 +206,23 @@ pytest -q
 | CI/CD (GitHub Actions) | ✅ |
 | Monitoring (`/health`, `/metrics`) | ✅ |
 | Cost control (rate limiting, token budget) | ✅ |
+
+## Screenshots
+
+| `/start` | `/ask` |
+| --- | --- |
+| ![start command](screenshots/start-command.jpg) | ![ask command](screenshots/ask-command.jpg) |
+
+| `/quiz` | `/progress` |
+| --- | --- |
+| ![quiz command](screenshots/quiz-command.jpg) | ![progress command](screenshots/progress-command.jpg) |
+
+| `/summarize` | `/plan` |
+| --- | --- |
+| ![summarize command](screenshots/summarize-command1.jpg) | ![plan command](screenshots/plan-command.jpg) |
+
+![generated study plan](screenshots/study-plan.jpg)
+
+| `/endsession` |
+| --- |
+| ![endsession command](screenshots/endsession-command.jpg) |
